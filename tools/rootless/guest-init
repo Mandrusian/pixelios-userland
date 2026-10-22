@@ -1,0 +1,93 @@
+#!/bin/busybox sh
+# PID 1 of the rootless build guest (tools/rootless/vm.sh packs this as /init). Everything it needs is on
+# virtio disks: vda = the HFS+ volume, vdb = payload tar, vdc = overlay tar (mode build); /ops.sh and
+# /keys.txt are packed into the initramfs. Mode comes from the kernel command line: ios.mode=build|list.
+export PATH=/bin:/sbin
+/bin/busybox --install -s /bin
+mount -t proc proc /proc
+mount -t sysfs sys /sys
+mount -t devtmpfs dev /dev
+umask 022
+mkdir -p /tmp
+
+say() { echo "[guest $(cut -d' ' -f1 /proc/uptime)s] $*"; }
+die() { echo "IOSROOT-GUEST-FAIL: $*"; sync; poweroff -f; sleep 600; }
+
+for a in $(cat /proc/cmdline); do
+	case $a in ios.*=*) k=${a%%=*}; eval "ios_${k#ios.}='${a#*=}'" ;; esac
+done
+
+for m in $(cat /modules.list); do insmod "$m" || die "insmod $m"; done
+i=0; while [ ! -b /dev/vda ] && [ $i -lt 50 ]; do sleep 0.2; i=$((i + 1)); done
+[ -b /dev/vda ] || die "no /dev/vda"
+say "kernel $(uname -r), $(grep MemTotal /proc/meminfo)"
+
+case ${ios_mode:-} in
+build)
+	mkdir -p /mnt
+	mount -t hfsplus -o rw,force /dev/vda /mnt || die "mount hfsplus"
+	# disks: vda volume, vdb shell.tar (the directories), vdc.. s1.tar..sN.tar (disjoint subtrees, extracted in parallel:
+	# one tar is bound by one vCPU running hfsplus), last = overlay.tar
+	n=${ios_n:?}
+	L=abcdefghijklmnopqrstuvwxyz
+	last=/dev/vd$(echo $L | cut -c$n)
+	for d in /sys/block/vd*; do echo 8192 >$d/queue/read_ahead_kb; done      # the tars read their archives from virtio disks: no stalls on small reads
+	say "extract shell"
+	tar -x -p --numeric-owner -C /mnt -f /dev/vdb || die "tar shell"
+	say "extract streams"
+	pids=; i=3
+	while [ $i -lt $n ]; do
+		(tar -x -p --numeric-owner -C /mnt -f /dev/vd$(echo $L | cut -c$i); r=$?; say "stream $((i - 2)) finished ($r)"; exit $r) &
+		pids="$pids $!"
+		i=$((i + 1))
+	done
+	for p in $pids; do wait $p || die "tar stream (pid $p)"; done
+	say "ops"
+	R=/mnt sh -e /ops.sh || die "ops.sh"
+	say "extract overlay"
+	tar -x -p --numeric-owner -C /mnt -f $last || die "tar overlay"
+	say "sync, umount"
+	sync
+	umount /mnt || die "umount"
+	say "done"
+	echo IOSROOT-GUEST-OK
+	;;
+list)
+	# ios.n=N read-only HFS+ images on vda.., listing + key file hashes of each go to the next disk (raw, NUL padded).
+	n=${ios_n:-1}
+	out=/dev/vd$(echo abcdefghijkl | cut -c$((n + 1)))
+	[ -b "$out" ] || die "no output disk $out"
+	{
+		i=0
+		while [ $i -lt "$n" ]; do
+			dev=/dev/vd$(echo abcdefghijkl | cut -c$((i + 1)))
+			mkdir -p /m/$i
+			mount -t hfsplus -o ro,force "$dev" /m/$i || die "mount $dev"
+			echo "== IMAGE $i $dev"
+			echo "== LISTING"
+			(cd /m/$i && find . -xdev -exec stat -c '%a %u %g %F %n' {} +)
+			echo "== LINKS"
+			(cd /m/$i && find . -xdev ! -type d -links +1 -exec stat -c '%h %n' {} +)
+			echo "== HASHES"
+			(cd /m/$i && while IFS= read -r f; do
+				[ -f "$f" ] && sha256sum "$f" || echo "missing $f"
+			done </keys.txt)
+			if [ "${ios_deep:-}" = 1 ]; then
+				echo "== DEEP"
+				# 4 shards on 4 vCPUs (busybox xargs -P mangles -0 arguments)
+				(cd /m/$i && find . -xdev -type f >/tmp/files 2>/dev/null; for k in 0 1 2 3; do
+					awk -v k=$k 'NR%4==k' /tmp/files | tr '\n' '\0' | xargs -0 -n 64 sha256sum >/tmp/h$k 2>&1 &
+				done; wait; cat /tmp/h0 /tmp/h1 /tmp/h2 /tmp/h3; rm -f /tmp/files /tmp/h?)
+			fi
+			umount /m/$i
+			i=$((i + 1))
+		done
+		echo "== END"
+	} >"$out" || die "list"
+	sync
+	echo IOSROOT-GUEST-OK
+	;;
+*) die "unknown ios.mode=${ios_mode:-}" ;;
+esac
+poweroff -f
+sleep 600

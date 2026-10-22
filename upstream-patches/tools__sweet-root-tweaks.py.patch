@@ -1,0 +1,501 @@
+--- a/tools/sweet-root-tweaks.py
++++ b/tools/sweet-root-tweaks.py
+@@ -1,21 +1,45 @@
+ #!/usr/bin/env python3
+ """Apply the SWEET bring-up changes to an iOS root made by tools/mkiosroot.sh.
+ 
+-  sudo sweet-root-tweaks.py MOUNTED_ROOT
++  sudo sweet-root-tweaks.py MOUNTED_ROOT          legacy: edit a mounted root in place
++  sweet-root-tweaks.py --plan SRC_ROOT OUTDIR     rootless: write OUTDIR/ops.sh + OUTDIR/overlay.tar
+ 
+ MOUNTED_ROOT is the HFS+ image mounted read-write (Linux: run
+ `fsck.hfsplus -fy` on the image, then `mount -t hfsplus -o loop,force`).
+-Run as root (it writes root/mobile owned files). Idempotent. This is what
++Run as root (it writes root/mobile owned files). Idempotent.
++
++--plan needs no root: it only READS SRC_ROOT (e.g. the apfs-fuse mount of the OS dmg)
++and records the same changes as a shell script (mkdir/chown/chmod/mv/rm; run it with
++R=<target root>) plus a tar of the new and replaced files with explicit owner and mode
++(extract it after ops.sh with `tar -x -p --numeric-owner`). tools/build-ios-root-rootless.sh
++applies both inside a tiny qemu guest. Both modes run the same code below (class Live or
++class Plan), so they produce the same tree. This is what
+ turned the plain mkiosroot.sh output into the images that reach the home
+ screen (image versions v8-v14 in NOTES.md):
+ 
+   launchd.plist   _PanicOnCrash -> _PanicOnCrasX (a crashing daemon must not
+                   panic the system); CommCenter jobs removed (no baseband: it
+-                  crash-loops and Setup blocks on its CoreTelephony XPC)
++                  crash-loops and Setup blocks on its CoreTelephony XPC);
++                  fairplayd.H2 removed (no FairPlay kext: it exits at launch,
++                  launchd relaunches it every ~10 s and MIG requests queued on
++                  its port never get a reply; locationd blocks on one and with
++                  it the CoreLocation data migrator); voicemail vmd removed (it
++                  retries the missing CommCenter XPC ~29k times per boot);
++                  ReportCrash, spindump, tailspind, aggregated(.addaily)
++                  removed (diagnostics only; ReportCrash alone used ~60% of a
++                  core, boot 0109b)
+   containers      /private/var/containers/{Bundle,Data/System,Shared/SystemGroup,Temp}
+                   (on iOS they live on the data volume)
+-  migration       LastSystemVersion so DataMigration does not run for an hour
+-                  on every boot
++  migration       /private/var/datamigrator/migrate sentinel: DataMigration
++                  runs once on first boot (it registers the app extensions;
++                  without it no wallpapers or widgets). Skipping it via
++                  LastSystemVersion left LaunchServices with 1 of 524 appex.
++  feature flags   ExtensionKit enforce_xpc_cache_code_signing off: the
++                  extension point definitions (System/Library/xpc/extensions.plist)
++                  are read through their detached .sig, which needs trust
++                  caches our kernel does not have; without them every app
++                  extension (wallpapers, widgets, ...) is rejected by installd
++                  ("does not correspond to a known extension point")
+   audio           VirtualAudio HAL plug-in disabled (mediaserverd crash)
+   MediaToolbox    StartRecorderServer=false (camera filter prewarm calls a
+                   NULL OpenGL function without a GPU -> mediaserverd crash loop)
+@@ -27,79 +51,246 @@
+                   comes from its Hactivation branch, selected by the /chosen
+                   security-status properties in tools/mkadt.py
+ """
+-import glob, os, plistlib, shutil, sys
++import fnmatch, glob, io, os, plistlib, shlex, shutil, subprocess, sys, tarfile, tempfile
+ 
+ BUILD, VERSION = '20H392', '16.7.16'
+ MOBILE = 501
+ 
+ 
+-def load(path):
+-    with open(path, 'rb') as f:
+-        return plistlib.load(f)
++class Live:
++    """Edit a mounted, writable root in place (needs root). Paths are relative to the root."""
++
++    def __init__(self, root):
++        self.root = root
++
++    def p(self, rel):
++        return os.path.join(self.root, rel)
++
++    def exists(self, rel):
++        return os.path.exists(self.p(rel))
++
++    def isdir(self, rel):
++        return os.path.isdir(self.p(rel))
++
++    def listdir(self, rel):
++        return os.listdir(self.p(rel))
++
++    def glob(self, pattern):
++        return [os.path.relpath(g, self.root) for g in glob.glob(self.p(pattern))]
++
++    def walk(self, rel):
++        for dp, dn, fn in os.walk(self.p(rel)):
++            yield os.path.relpath(dp, self.root), dn, fn
++
++    def stat(self, rel):
++        st = os.stat(self.p(rel))
++        return st.st_uid, st.st_gid, st.st_mode & 0o7777
++
++    def read(self, rel):
++        with open(self.p(rel), 'rb') as f:
++            return f.read()
++
++    def write(self, rel, data, uid, gid, mode):
++        with open(self.p(rel), 'wb') as f:
++            f.write(data)
++        os.chown(self.p(rel), uid, gid)
++        os.chmod(self.p(rel), mode)
++
++    def makedirs(self, rel):
++        os.makedirs(self.p(rel), exist_ok=True)
++
++    def touch(self, rel):
++        open(self.p(rel), 'a').close()
++
++    def chown(self, rel, uid, gid):
++        os.chown(self.p(rel), uid, gid)
++
++    def chmod(self, rel, mode):
++        os.chmod(self.p(rel), mode)
++
++    def move(self, rel, to):
++        shutil.move(self.p(rel), self.p(to))
++
++    def heic_to_png(self, tool, heic, png):
++        subprocess.run([tool, self.p(heic), self.p(png)], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
++
++
++class Plan:
++    """Read SRC (never written) and record the changes: self.ops (sh lines, run with R=target root) and
++    self.tar (files with explicit owner and mode). `guard` = rel paths that a LATER step adds to the tree (the
++    cryptex hard links of tools/ios-root-plan.py): looking at one raises, since Live would see a different tree."""
++
++    def __init__(self, src, tar, guard=()):
++        self.src, self.tar, self.ops = src, tar, []
++        self.guard = set(guard)
++        self.guard_dirs = {os.path.dirname(g) for g in self.guard}
++        self.new_dirs, self.new_files, self.gone = set(), set(), set()
++
++    def p(self, rel):
++        return os.path.join(self.src, rel)
++
++    def sh(self, *words):
++        self.ops.append(' '.join(words))
++
++    def q(self, rel):
++        return '"$R"/' + shlex.quote(rel)
++
++    def _look(self, rel, dir_=False):
++        rel = os.path.normpath(rel)
++        if rel in self.guard or (dir_ and any(d == rel or d.startswith(rel + '/') for d in self.guard_dirs)):
++            raise RuntimeError(f'plan: {rel} is looked at, but a later step changes it: model that step first')
++        return rel
++
++    def exists(self, rel):
++        rel = self._look(rel)
++        return rel in self.new_dirs or rel in self.new_files or (rel not in self.gone and os.path.exists(self.p(rel)))
++
++    def isdir(self, rel):
++        rel = self._look(rel, True)
++        return rel in self.new_dirs or (rel not in self.new_files and rel not in self.gone and os.path.isdir(self.p(rel)))
++
++    def listdir(self, rel):
++        return os.listdir(self.p(self._look(rel, True)))
+ 
++    def glob(self, pattern):
++        for g in self.guard:
++            if fnmatch.fnmatch(g, pattern):
++                self._look(g)
++        return [os.path.relpath(g, self.src) for g in glob.glob(self.p(pattern))]
+ 
+-def save(path, data, uid, gid, mode, fmt=plistlib.FMT_BINARY):
+-    with open(path, 'wb') as f:
+-        plistlib.dump(data, f, fmt=fmt)
+-    os.chown(path, uid, gid)
+-    os.chmod(path, mode)
++    def walk(self, rel):
++        for dp, dn, fn in os.walk(self.p(self._look(rel, True))):
++            yield os.path.relpath(dp, self.src), dn, fn
+ 
++    def stat(self, rel):
++        st = os.stat(self.p(self._look(rel)))
++        return st.st_uid, st.st_gid, st.st_mode & 0o7777
+ 
+-def merge_pref(root, name, values):
++    def read(self, rel):
++        with open(self.p(self._look(rel)), 'rb') as f:
++            return f.read()
++
++    def write(self, rel, data, uid, gid, mode):
++        rel = self._look(rel)
++        if not self.isdir(os.path.dirname(rel) or '.'):
++            raise FileNotFoundError(rel)
++        if rel not in self.new_files and rel not in self.gone and os.path.lexists(self.p(rel)):
++            if os.lstat(self.p(rel)).st_nlink > 1:
++                raise RuntimeError(f'plan: {rel} is hard linked: Live would change every link')
++            self.sh('rm -f', self.q(rel))                 # tar then creates it fresh
++        self.new_files.add(rel)
++        ti = tarfile.TarInfo(rel)
++        ti.size, ti.uid, ti.gid, ti.mode = len(data), uid, gid, mode
++        self.tar.addfile(ti, io.BytesIO(data))
++
++    def makedirs(self, rel):
++        rel = self._look(rel)
++        if not self.isdir(rel):
++            self.sh('mkdir -p', self.q(rel))              # parents: root, 0755 (umask 022), like os.makedirs under sudo
++            parts = rel.split('/')
++            self.new_dirs.update('/'.join(parts[:i]) for i in range(1, len(parts) + 1))
++
++    def touch(self, rel):
++        rel = self._look(rel)
++        if not self.exists(rel):
++            self.sh('touch', self.q(rel))
++            self.new_files.add(rel)
++
++    def chown(self, rel, uid, gid):
++        self.sh('chown', f'{uid}:{gid}', self.q(self._look(rel)))
++
++    def chmod(self, rel, mode):
++        self.sh('chmod', '%o' % mode, self.q(self._look(rel)))
++
++    def move(self, rel, to):
++        rel, to = self._look(rel), self._look(to)
++        self.sh('mv', self.q(rel), self.q(to))
++        (self.new_dirs if self.isdir(rel) else self.new_files).add(to)
++        self.gone.add(rel)
++
++    def heic_to_png(self, tool, heic, png):
++        with tempfile.TemporaryDirectory() as d:
++            out = os.path.join(d, 'x.png')
++            subprocess.run([tool, self.p(heic), out], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
++            with open(out, 'rb') as f:
++                self.write(png, f.read(), 0, 0, 0o644)    # what Live gets as root with umask 022
++
++
++def load(fs, rel):
++    return plistlib.loads(fs.read(rel))
++
++
++def save(fs, rel, data, uid, gid, mode, fmt=plistlib.FMT_BINARY):
++    fs.write(rel, plistlib.dumps(data, fmt=fmt), uid, gid, mode)
++
++
++def merge_pref(fs, name, values):
+     """Merge keys into /var/mobile/Library/Preferences/NAME.plist (mobile, 0600)."""
+-    path = os.path.join(root, 'private/var/mobile/Library/Preferences', name + '.plist')
+-    data = load(path) if os.path.exists(path) else {}
++    rel = 'private/var/mobile/Library/Preferences/' + name + '.plist'
++    data = load(fs, rel) if fs.exists(rel) else {}
+     data.update(values)
+-    save(path, data, MOBILE, MOBILE, 0o600)
++    save(fs, rel, data, MOBILE, MOBILE, 0o600)
+     print('pref', name, sorted(values))
+ 
+ 
+-def launchd(root):
+-    path = os.path.join(root, 'System/Library/xpc/launchd.plist')
+-    st = os.stat(path)
+-    plist = load(path)
++def launchd(fs):
++    rel = 'System/Library/xpc/launchd.plist'
++    uid, gid, mode = fs.stat(rel)
++    plist = load(fs, rel)
+     jobs = plist['LaunchDaemons']
+     renamed = 0
+     for job in jobs.values():
+         if '_PanicOnCrash' in job:
+             job['_PanicOnCrasX'] = job.pop('_PanicOnCrash')
+             renamed += 1
+-    removed = [k for k, j in jobs.items() if j.get('Label') == 'com.apple.CommCenter']
++    removed = [k for k, j in jobs.items()
++               if j.get('Label') in ('com.apple.CommCenter', 'com.apple.fairplayd.H2',
++                                      'com.apple.voicemail.vmd', 'com.apple.ReportCrash',
++                                      'com.apple.spindump', 'com.apple.tailspind',
++                                      'com.apple.aggregated', 'com.apple.aggregated.addaily')]
+     for k in removed:
+         del jobs[k]
+-    save(path, plist, st.st_uid, st.st_gid, st.st_mode & 0o7777)
+-    print(f'launchd.plist: {renamed} _PanicOnCrash renamed, {len(removed)} CommCenter jobs removed')
++    # CoreAnimation's CPU renderer (no GPU) copies a backdrop 1:1 into the
++    # downscaled capture surface (CA::OGL::SWContext::copy_destination), so
++    # blurs showed only their top part and black below. CA_BACKDROP_SCALE=N
++    # sets the capture scale to 1/N (CA::OGL::capture_backdrop).
++    for j in jobs.values():
++        if j.get('Label') == 'com.apple.backboardd':
++            j.setdefault('EnvironmentVariables', {})['CA_BACKDROP_SCALE'] = '1'
++    save(fs, rel, plist, uid, gid, mode)
++    print(f'launchd.plist: {renamed} _PanicOnCrash renamed, {len(removed)} jobs removed (CommCenter, fairplayd, vmd, diagnostics), '
++          'backboardd CA_BACKDROP_SCALE=1')
+ 
+ 
+-def containers(root):
+-    base = os.path.join(root, 'private/var/containers')
++def containers(fs):
++    base = 'private/var/containers'
+     for sub, uid in (('Bundle', 33), ('Data/System', 0), ('Shared/SystemGroup', 0), ('Temp', 0)):
+         d = os.path.join(base, sub)
+-        if not os.path.isdir(d):
+-            os.makedirs(d)
+-            os.chown(d, uid, uid)
+-            os.chmod(d, 0o755)
++        if not fs.isdir(d):
++            fs.makedirs(d)
++            fs.chown(d, uid, uid)
++            fs.chmod(d, 0o755)
+             print('mkdir', d)
+ 
+ 
+-def find_container(root, kind, identifier):
+-    for meta in glob.glob(os.path.join(root, 'private/var/containers', kind, '*',
+-                                       '.com.apple.mobile_container_manager.metadata.plist')):
+-        if load(meta).get('MCMMetadataIdentifier') == identifier:
++def find_container(fs, kind, identifier):
++    for meta in fs.glob(os.path.join('private/var/containers', kind, '*',
++                                     '.com.apple.mobile_container_manager.metadata.plist')):
++        if load(fs, meta).get('MCMMetadataIdentifier') == identifier:
+             return os.path.dirname(meta)
+     return None
+ 
+ 
+-def activation(root):
+-    c = find_container(root, 'Data/System', 'com.apple.mobileactivationd')
++def activation(fs):
++    c = find_container(fs, 'Data/System', 'com.apple.mobileactivationd')
+     if c is None:
+         print('warning: no mobileactivationd system container in the image; skipped data ark')
+         return
+     d = os.path.join(c, 'Library/internal')
+-    os.makedirs(d, exist_ok=True)
+-    os.chown(d, MOBILE, MOBILE)
+-    os.chmod(d, 0o755)
+-    save(os.path.join(d, 'data_ark.plist'), {
++    fs.makedirs(d)
++    fs.chown(d, MOBILE, MOBILE)
++    fs.chmod(d, 0o755)
++    save(fs, os.path.join(d, 'data_ark.plist'), {
+         '-ActivationState': 'Activated', '-BrickState': False,
+         '-BuildVersion': BUILD, '-ProductVersion': VERSION,
+         '-DataMigrationCompleted': True, '-PreSydroDataMigrationCompleted': True,
+@@ -107,47 +298,137 @@
+     print('data ark', d)
+ 
+ 
+-def audio(root):
+-    src = os.path.join(root, 'Library/Audio/Plug-Ins/HAL/VirtualAudio.plugin')
+-    dst_dir = os.path.join(root, 'Library/Audio/Plug-Ins/HAL.disabled')
+-    if os.path.exists(src):
+-        os.makedirs(dst_dir, exist_ok=True)
+-        shutil.move(src, dst_dir)
++def feature_flags(fs):
++    d = 'private/var/preferences/FeatureFlags/Domain'
++    fs.makedirs(d)
++    save(fs, d + '/ExtensionKit.plist', {'enforce_xpc_cache_code_signing': {'Enabled': False}}, 0, 0, 0o644, plistlib.FMT_XML)
++    print('feature flag ExtensionKit/enforce_xpc_cache_code_signing off')
++
++
++def audio(fs):
++    src = 'Library/Audio/Plug-Ins/HAL/VirtualAudio.plugin'
++    dst_dir = 'Library/Audio/Plug-Ins/HAL.disabled'
++    if fs.exists(src):
++        fs.makedirs(dst_dir)
++        fs.move(src, dst_dir + '/VirtualAudio.plugin')
+         print('VirtualAudio.plugin disabled')
+-    for conf in glob.glob(os.path.join(root, 'System/Library/Frameworks/MediaToolbox.framework/*/SubServerConfiguration.plist')):
+-        st = os.stat(conf)
+-        data = load(conf)
++    for conf in fs.glob('System/Library/Frameworks/MediaToolbox.framework/*/SubServerConfiguration.plist'):
++        uid, gid, mode = fs.stat(conf)
++        data = load(fs, conf)
+         data['StartRecorderServer'] = False
+-        save(conf, data, st.st_uid, st.st_gid, st.st_mode & 0o7777, plistlib.FMT_XML)
+-        print('StartRecorderServer off', os.path.relpath(conf, root))
++        save(fs, conf, data, uid, gid, mode, plistlib.FMT_XML)
++        print('StartRecorderServer off', conf)
+ 
+ 
+-def main():
+-    if len(sys.argv) != 2 or not os.path.isdir(os.path.join(sys.argv[1], 'System/Library/xpc')):
+-        sys.exit(__doc__)
+-    root = sys.argv[1]
+-    launchd(root)
+-    containers(root)
+-    activation(root)
+-    audio(root)
+-    merge_pref(root, 'com.apple.migration', {
+-        'LastSystemVersion': BUILD,
+-        'DMUserDataDisposition': {'SyntheticDidUpgrade': False, 'buildVersion': BUILD}})
+-    merge_pref(root, 'com.apple.springboard', {
++def apps(fs):
++    # iOS's own first-boot install of the stock apps fails on code signing here: move them into place.
++    src = 'private/var/staged_system_apps'
++    dst = 'Applications'
++    if not fs.isdir(src):
++        print('no staged_system_apps (nothing to move)')
++        return
++    fs.makedirs(dst)
++    n = 0
++    for name in sorted(fs.listdir(src)):
++        target = os.path.join(dst, name)
++        if not fs.exists(target):
++            fs.move(os.path.join(src, name), target)
++            n += 1
++    print(f'{n} stock apps moved from staged_system_apps to /Applications')
++
++
++def wallpapers(fs):
++    # The stock layered wallpapers need the A11 HEVC decoder (HEIC layers); give each a PNG twin and point main.caml at it
++    # (same idea as ios-sailfish tools/wallpaper-heic2png.sh, which needs macOS sips). Optional: needs heif-convert
++    # (Debian: sudo apt install libheif-examples); without it the wallpapers show only their background gradient.
++    base = 'Library/Wallpaper/Collections'
++    tool = shutil.which('heif-convert')
++    if not fs.isdir(base):
++        return
++    if not tool:
++        print('wallpapers: heif-convert not found: HEIC layers left as they are (apt install libheif-examples)')
++        return
++    n = 0
++    for dp, dn, fn in fs.walk(base):
++        for f in fn:
++            if f.upper().endswith('.HEIC'):
++                heic = os.path.join(dp, f)
++                png = heic.rsplit('.', 1)[0] + '.png'
++                if not fs.exists(png):
++                    fs.heic_to_png(tool, heic, png)
++                n += 1
++            elif f == 'main.caml':
++                p = os.path.join(dp, f)
++                t = fs.read(p).decode('utf-8', 'surrogateescape')
++                if '.HEIC"' in t:
++                    fs.write(p, t.replace('.HEIC"', '.png"').encode('utf-8', 'surrogateescape'), *fs.stat(p))
++    print(f'wallpapers: {n} HEIC images given PNG twins')
++
++
++def device_name(fs, name='Pixel 6a'):
++    # Settings > General > About > Name is configd's ComputerName (SystemConfiguration preferences.plist); the stock default is
++    # "iPhone". Key layout is the stock one (guess for 16.7 until the next run shows About > Name).
++    d = 'private/var/preferences/SystemConfiguration'
++    rel = d + '/preferences.plist'
++    fs.makedirs(d)
++    data = load(fs, rel) if fs.exists(rel) else {}
++    sysd = data.setdefault('System', {}).setdefault('System', {})
++    sysd['ComputerName'] = name
++    sysd['ComputerNameEncoding'] = 0x8000000
++    sysd['HostName'] = name.replace(' ', '-')
++    save(fs, rel, data, 0, 0, 0o644)
++    print('device name:', name)
++
++
++def apply(fs):
++    launchd(fs)
++    containers(fs)
++    activation(fs)
++    feature_flags(fs)
++    audio(fs)
++    apps(fs)
++    wallpapers(fs)
++    device_name(fs)
++    sentinel = 'private/var/datamigrator/migrate'
++    fs.makedirs(os.path.dirname(sentinel))
++    fs.touch(sentinel)
++    fs.chown(sentinel, MOBILE, MOBILE)
++    merge_pref(fs, 'com.apple.springboard', {
+         'BKNoWatchdogs': True,
+         'FBLaunchWatchdogExceptions': {'com.apple.purplebuddy': 100.0},
+-        'MCForceShowCloudConfigurationUI': False})
+-    merge_pref(root, 'com.apple.purplebuddy', {
++        'MCForceShowCloudConfigurationUI': False,
++        # no GPU: the vibrant lock-screen clock renders see-through/red (hackios inject_sb.c:412-431, same symptom; guess for ours)
++        'BSUIVibrancyEffectViewDisabled': True})
++    merge_pref(fs, 'com.apple.purplebuddy', {
+         'SetupDone': True, 'SetupFinishedAllSteps': True, 'SetupVersion': 11,
+         'daemonizeNeedsToRun': False})
+-    merge_pref(root, 'com.apple.purplebuddy.notbackedup', {
++    merge_pref(fs, 'com.apple.purplebuddy.notbackedup', {
+         k: False for k in ('ShouldRunDiagnosticsMiniBuddy', 'ShouldRunHSA2MiniBuddy',
+                            'ShouldRunKeychainSyncMiniBuddy', 'ShouldRunMesaMiniBuddy',
+                            'ShouldRunPaymentMiniBuddy', 'ShouldRunStandardMiniBuddy',
+                            'SilentICDPUpgrade')})
+-    merge_pref(root, 'com.apple.managedconfiguration.notbackedup', {
++    merge_pref(fs, 'com.apple.managedconfiguration.notbackedup', {
+         'LockdownActivationIndicatesCloudConfigurationAvailable': False})
+ 
+ 
++def write_plan(plan, outdir):
++    with open(os.path.join(outdir, 'ops.sh'), 'w') as f:
++        f.write('\n'.join(plan.ops) + '\n')
++
++
++def main():
++    a = sys.argv[1:]
++    if len(a) == 3 and a[0] == '--plan':
++        os.makedirs(a[2], exist_ok=True)
++        with tarfile.open(os.path.join(a[2], 'overlay.tar'), 'w', format=tarfile.GNU_FORMAT) as tar:
++            plan = Plan(a[1], tar)
++            apply(plan)
++        write_plan(plan, a[2])
++    elif len(a) == 1 and os.path.isdir(os.path.join(a[0], 'System/Library/xpc')):
++        apply(Live(a[0]))
++    else:
++        sys.exit(__doc__)
++
++
+ if __name__ == '__main__':
+     main()

@@ -1,0 +1,88 @@
+--- a/tools/mkiosroot.sh
++++ b/tools/mkiosroot.sh
+@@ -3,6 +3,7 @@
+ # root filesystem plus its cryptexes, for the userdata partition (rd=ufsroot0).
+ #
+ #   mkiosroot.sh OS.dmg SYSTEMOS.dmg APPOS.dmg OUT.img [SIZE]     (SIZE default 16G)
++#   mkiosroot.sh --preflight                                      (check the host tools only)
+ #
+ # The IPSW images are raw APFS with LZBITMAP-compressed files: they are read
+ # through apfs-fuse (decompressing), so the HFS+ copy is uncompressed. On a
+@@ -18,24 +19,52 @@
+ # keybagd reads with /defaults/no-effaceable-storage (tools/mkadt.py).
+ set -euo pipefail
+ 
+-[[ $# -ge 4 ]] || { sed -n '2,12p' "$0"; exit 2; }
+-os=$(realpath "$1") sysos=$(realpath "$2") appos=$(realpath "$3") out=$4 size=${5:-16G}
+-[[ ! -e $out ]] || { echo "refusing to overwrite $out" >&2; exit 1; }
++# mkfs/fsck.hfsplus live in /usr/sbin, which is not on a normal user's PATH on Debian.
++PATH=$PATH:/usr/sbin:/sbin
+ 
+-# Pre-flight tool check
+-missing_tools=()
+-for tool in apfs-fuse mkfs.hfsplus rsync; do
+-	command -v "$tool" >/dev/null 2>&1 || missing_tools+=("$tool")
+-done
++# Sets $apfs to the apfs-fuse binary: $APFS_FUSE, then PATH, then <artifacts>/apfs-src/build/apfs-fuse
++# ($PIXELIOS_ARTIFACTS, ~/pixelios-artifacts, or that of the user who ran sudo). Prints every problem found.
++preflight() {
++	local bad=0 c home=$HOME
++	[[ -z ${SUDO_USER:-} ]] || home=$(getent passwd "$SUDO_USER" | cut -d: -f6)
++	apfs=
++	for c in "${APFS_FUSE:-}" "$(command -v apfs-fuse || true)" \
++		"${PIXELIOS_ARTIFACTS:-$home/pixelios-artifacts}/apfs-src/build/apfs-fuse"; do
++		if [[ -n $c && -f $c && -x $c ]]; then apfs=$(realpath "$c"); break; fi
++	done
++	if [[ -z $apfs ]]; then
++		bad=1
++		echo "error: apfs-fuse not found${APFS_FUSE:+ (APFS_FUSE=$APFS_FUSE is not an executable file)}." >&2
++		echo "  Searched: \$APFS_FUSE, PATH, ${PIXELIOS_ARTIFACTS:-$home/pixelios-artifacts}/apfs-src/build/apfs-fuse" >&2
++		echo "  Point the script at your build:  APFS_FUSE=/path/to/apfs-fuse $0 ..." >&2
++		echo "  or put it on PATH:               ln -s /path/to/apfs-fuse ~/.local/bin/apfs-fuse" >&2
++		echo "  or build it (no Debian/Ubuntu package; FUSE 2 is the default):" >&2
++		echo "    sudo apt install fuse libfuse-dev cmake g++ git zlib1g-dev libbz2-dev" >&2
++		echo "    git clone --recursive https://github.com/sgan81/apfs-fuse && cd apfs-fuse && mkdir build && cd build && cmake .. && make" >&2
++		echo "    (binary: build/apfs-fuse)" >&2
++	fi
++	if ! command -v mkfs.hfsplus >/dev/null || ! command -v fsck.hfsplus >/dev/null; then
++		bad=1
++		echo "error: mkfs.hfsplus / fsck.hfsplus not found (searched PATH plus /usr/sbin and /sbin)." >&2
++		echo "  Debian/Ubuntu: sudo apt install hfsprogs     (installs both into /usr/sbin)" >&2
++		echo "  Other distros: install the package that ships Apple's mkfs.hfsplus and fsck.hfsplus (often called hfsprogs)." >&2
++	fi
++	if ! command -v rsync >/dev/null; then
++		bad=1
++		echo "error: rsync not found (Debian/Ubuntu: sudo apt install rsync)." >&2
++	fi
++	if [[ ! -e /dev/fuse ]] || { ! command -v fusermount >/dev/null && ! command -v fusermount3 >/dev/null; }; then
++		bad=1
++		echo "error: FUSE is not usable (/dev/fuse or fusermount missing; Debian/Ubuntu: sudo apt install fuse)." >&2
++	fi
++	return $bad
++}
+ 
+-if [[ ${#missing_tools[@]} -gt 0 ]]; then
+-	echo "Error: missing required host utilities: ${missing_tools[*]}" >&2
+-	echo "  Install instructions:" >&2
+-	echo "    Arch Linux:    sudo pacman -S apfs-fuse hfsprogs rsync" >&2
+-	echo "    Ubuntu/Debian: sudo apt install apfs-fuse hfsprogs rsync" >&2
+-	echo "    Fedora:        sudo dnf install apfs-fuse hfsplus-tools rsync" >&2
+-	exit 1
+-fi
++if [[ ${1:-} == --preflight ]]; then preflight; exit; fi
++[[ $# -ge 4 ]] || { sed -n '2,6p' "$0"; exit 2; }
++os=$(realpath "$1") sysos=$(realpath "$2") appos=$(realpath "$3") out=$4 size=${5:-16G}
++[[ ! -e $out ]] || { echo "refusing to overwrite $out" >&2; exit 1; }
++preflight || exit 1
+ 
+ work=$(mktemp -d)
+ mounts=()
+@@ -64,7 +93,7 @@
+ 	ln -s "$1" "$work/$2.dmg"
+ 	mkdir "$work/$2"
+ 	# As root: a user's FUSE mount is unreadable to the root rsync below.
+-	sudo "$(command -v apfs-fuse)" "$work/$2.dmg" "$work/$2"
++	sudo "$apfs" "$work/$2.dmg" "$work/$2"
+ 	mounts+=("$work/$2")
+ }
+ apfs_mount "$os" os

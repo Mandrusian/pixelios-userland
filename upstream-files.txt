@@ -1,0 +1,3 @@
+tools/mkinit.py
+tools/patch-launchd-plist.py
+tools/sweet-init.S
