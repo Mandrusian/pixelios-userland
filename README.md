@@ -15,12 +15,20 @@ on a Pixel 6a; touch works, the UI is slow, and Wi-Fi, GPU, audio, camera and mo
 
 - `tools/build-ios-root.sh`, `tools/build-ios-root-rootless.sh`: build the root (the rootless variant needs no sudo,
   see `docs/ROOTLESS_BUILD.md`)
-- `tools/mkiosroot.sh`, `tools/mkinit.py`, `tools/sweet-init.S`, `tools/sweet-root-tweaks.py`, `tools/patch-launchd-plist.py`:
+- `tools/mkiosroot.sh`, `tools/mkinit.py`, `tools/sweet-init.S`, `tools/patch-launchd-plist.py`:
   image assembly, init and launchd tweaks
+- `tools/sweet-root-tweaks.py`: root tweaks (our own, clean-room, written from the spec
+  `docs/cleanroom/sweet-root-tweaks-spec.md` in the super repo)
 - `tools/ios-root-plan.py`, `tools/check-ios-root.py`: plan and verify a root before flashing
 
-Some files derive from [ios-sweet](https://github.com/dipa-studio/ios-sweet) (no license): they are not copied here; run
-`tools/setup-upstream.sh` to fetch the pinned upstream and apply our diffs in `upstream-patches/`.
+Four files in `tools/` (`mkiosroot.sh`, `mkinit.py`, `sweet-init.S`, `patch-launchd-plist.py`) derive from
+[ios-sweet](https://github.com/dipa-studio/ios-sweet) (MIT, Copyright (c) 2026 dipa-studio), taken at commit `11da58b` with our
+changes applied; the licence text is in [LICENSE-ios-sweet.txt](LICENSE-ios-sweet.txt).
+
+Fix-forward (user decision, 2026-10-25): `origin/main` history holds `upstream-patches/tools__sweet-root-tweaks.py.patch` (blob `4a855b6827`),
+which shares 30 of 177 lines with a third-party-derived source [observed, line comparison]. `tools/sweet-root-tweaks.py` was replaced by a
+clean-room version (commit `9e4e38d`) [src]. The old patch cannot be unpublished and stays in history; no history rewrite was done.
+This is a maintainer's record, not a legal opinion.
 
 Other repositories: [pixelios-kernel](https://github.com/PixOS-Project/pixelios-kernel) (shim, XNU patches, boot tools),
 [pixelios-site](https://github.com/PixOS-Project/pixelios-site) (docs and status). Our code is MIT; read

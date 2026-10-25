@@ -50,6 +50,52 @@ class PlanEqualsLive(unittest.TestCase):
                 plan.exists('usr/lib/x')
             with self.assertRaises(RuntimeError):
                 plan.listdir('usr/lib')                    # a later step adds a file there
+            # F3: the change operations are guarded too
+            for op in (lambda: plan.write('usr/lib/x', b'', 0, 0, 0o644), lambda: plan.makedirs('usr/lib/x/d'),
+                       lambda: plan.touch('usr/lib/x'), lambda: plan.chown('usr/lib/x', 0, 0),
+                       lambda: plan.chmod('usr/lib/x', 0o644), lambda: plan.move('usr/lib/y', 'usr/lib/x'),
+                       lambda: plan.move('usr/lib/x', 'usr/lib/y')):
+                with self.assertRaises(RuntimeError):
+                    op()
+            plan.makedirs('usr/lib/y')                     # allow: a path outside the guard still works
+            plan.write('usr/lib/y/f', b'', 0, 0, 0o644)
+
+    def _tw(self):
+        spec = importlib.util.spec_from_file_location('tw', TW)
+        tw = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(tw)
+        return tw
+
+    def test_symlink_write(self):
+        # F1: writing through a symlink is refused in both modes and leaves the target alone.
+        tw = self._tw()
+        with tempfile.TemporaryDirectory() as t:
+            os.makedirs(t + '/d')
+            with open(t + '/d/real', 'w') as f:
+                f.write('x')
+            os.chmod(t + '/d/real', 0o600)
+            os.symlink('real', t + '/d/link')
+            for fs in (tw.Live(t), tw.Plan(t, tarfile.open(fileobj=io.BytesIO(), mode='w'))):
+                with self.assertRaises(RuntimeError):
+                    fs.write('d/link', b'y', 0, 0, 0o777)
+            self.assertEqual(os.stat(t + '/d/real').st_mode & 0o7777, 0o600)
+            with open(t + '/d/real') as f:
+                self.assertEqual(f.read(), 'x')
+            tw.Live(t).write('d/new', b'z', os.getuid(), os.getgid(), 0o644)    # allow: a plain file
+            tw.Plan(t, tarfile.open(fileobj=io.BytesIO(), mode='w')).write('d/real', b'y', 0, 0, 0o644)
+
+    def test_walk_same_in_both_modes(self):
+        # F2: a directory symlink is listed but not entered, in plan mode as in live mode.
+        tw = self._tw()
+        with tempfile.TemporaryDirectory() as t:
+            os.makedirs(t + '/a/real')
+            open(t + '/a/real/f', 'w').close()
+            os.symlink('real', t + '/a/link')
+            walks = [[(p, d, fl) for p, d, fl in fs.walk('')]
+                     for fs in (tw.Live(t), tw.Plan(t, tarfile.open(fileobj=io.BytesIO(), mode='w')))]
+            self.assertEqual(walks[0], walks[1])
+            self.assertNotIn('a/link', [p for p, _, _ in walks[1]])
+            self.assertIn('a/real', [p for p, _, _ in walks[1]])
 
 
 if __name__ == '__main__':
