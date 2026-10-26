@@ -1,0 +1,89 @@
+name: PixelIOS Phase 6A - Static Darwin PID 1
+
+on:
+  push:
+    branches:
+      - phase6a-static-init-ci
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout userspace
+        uses: actions/checkout@v4
+
+      - name: Build static ARM64 Darwin init
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          mkdir -p dist
+          xcodebuild -version
+
+          xcrun clang -target arm64-apple-ios16.0 \
+            -x assembler-with-cpp -c \
+            tools/sweet-init.S \
+            -o dist/sweet-init.o
+
+          python3 tools/mkinit.py \
+            dist/sweet-init.o dist/launchd
+
+          file dist/launchd
+
+      - name: Verify Mach-O binary
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          python3 - <<'PY'
+          import struct
+          from pathlib import Path
+
+          b = Path("dist/launchd").read_bytes()
+
+          magic, cpu, subtype, kind, count, size, flags, reserved = \
+              struct.unpack_from("<8I", b)
+
+          assert magic == 0xfeedfacf
+          assert cpu == 0x0100000c
+          assert kind == 2
+          assert 0 < count <= 20
+
+          commands = []
+          off = 32
+          for _ in range(count):
+              cmd, length = struct.unpack_from("<II", b, off)
+              assert length >= 8
+              assert off + length <= len(b)
+              commands.append(cmd)
+              off += length
+
+          assert 0x5 in commands
+          assert 0x1d in commands
+          assert 0xe not in commands
+          assert b"/dev/console" in b
+
+          print("PASS: ARM64 static Mach-O")
+          print("PASS: LC_UNIXTHREAD")
+          print("PASS: code signature command")
+          print("PASS: no dynamic linker")
+          PY
+
+          shasum -a 256 dist/launchd \
+            > dist/SHA256SUMS
+
+      - name: Upload Phase 6A artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: pixelios-phase6a-static-init
+          path: |
+            dist/launchd
+            dist/sweet-init.o
+            dist/SHA256SUMS
+          if-no-files-found: error
