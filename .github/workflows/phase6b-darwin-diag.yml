@@ -1,0 +1,94 @@
+name: PixelIOS Phase 6B - Darwin Process and VM Diagnostics
+
+on:
+  push:
+    branches:
+      - phase6b-darwin-diag-ci
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - name: Checkout fork branch
+        uses: actions/checkout@v4
+
+      - name: Assemble diagnostic init and package as signed static Mach-O
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p dist
+          xcodebuild -version
+          xcrun clang -target arm64-apple-ios16.0 -x assembler-with-cpp -c tools/phase6b-init.S -o dist/phase6b-init.o
+          python3 tools/mkinit.py dist/phase6b-init.o dist/launchd
+          file dist/launchd
+
+      - name: Audit architecture, signature, entry and diagnostic markers
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import hashlib
+          import struct
+          from pathlib import Path
+
+          obj = Path('dist/phase6b-init.o').read_bytes()
+          exe = Path('dist/launchd').read_bytes()
+          magic, cpu, _, kind, ncmds, _, _, _ = struct.unpack_from('<8I', obj, 0)
+          assert (magic, cpu, kind) == (0xfeedfacf, 0x0100000c, 1)
+          offset = 32
+          text = None
+          for _ in range(ncmds):
+              cmd, size = struct.unpack_from('<II', obj, offset)
+              assert 8 <= size and offset + size <= len(obj)
+              if cmd == 0x19:
+                  nsects, = struct.unpack_from('<I', obj, offset + 64)
+                  for i in range(nsects):
+                      sec = offset + 72 + i * 80
+                      name = obj[sec:sec+16].split(b'\0')[0]
+                      seg = obj[sec+16:sec+32].split(b'\0')[0]
+                      _, text_size, text_off, _, _, nrel = struct.unpack_from('<QQIIII', obj, sec+32)
+                      assert (seg, name) == (b'__TEXT', b'__text')
+                      assert nrel == 0, 'Phase6B object requires linking'
+                      text = obj[text_off:text_off + text_size]
+              offset += size
+          assert text is not None
+          assert len(text) < 8192
+
+          magic, cpu, _, kind, ncmds, _, _, _ = struct.unpack_from('<8I', exe, 0)
+          assert (magic, cpu, kind) == (0xfeedfacf, 0x0100000c, 2)
+          offset, cmds = 32, []
+          for _ in range(ncmds):
+              cmd, size = struct.unpack_from('<II', exe, offset)
+              assert 8 <= size and offset + size <= len(exe)
+              cmds.append(cmd)
+              offset += size
+          assert 0x5 in cmds and 0x1d in cmds
+          assert 0xe not in cmds and 0xc not in cmds
+          for marker in (
+              b'/dev/console', b'PIXELIOS PHASE 6B:', b'P6B PID=',
+              b'P6B PPID=', b'P6B UID=', b'P6B GID=',
+              b'P6B STACK PASS', b'P6B MMAP PASS',
+              b'P6B MMAP UNAVAILABLE', b'P6B HEARTBEAT:',
+          ):
+              assert marker in exe, marker
+          print('PASS: ARM64 static Mach-O, no dylinker, signature command present')
+          print('PASS: relocation-free diagnostic code, process+VM test markers')
+          print('PASS: init remains independent of libSystem, dyld and Apple IPSW')
+          print('sha256:', hashlib.sha256(exe).hexdigest())
+          PY
+          shasum -a 256 dist/launchd > dist/SHA256SUMS
+
+      - name: Upload Phase 6B Mach-O (not a boot image)
+        uses: actions/upload-artifact@v4
+        with:
+          name: pixelios-phase6b-darwin-diagnostics
+          path: |
+            dist/launchd
+            dist/phase6b-init.o
+            dist/SHA256SUMS
+          if-no-files-found: error
