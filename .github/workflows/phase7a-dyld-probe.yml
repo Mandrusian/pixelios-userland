@@ -1,0 +1,132 @@
+name: PixelIOS Phase 7A - Dynamic iOS libSystem Probe
+
+on:
+  push:
+    branches:
+      - phase7a-dyld-probe-ci
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - name: Checkout isolated Phase 7A branch
+        uses: actions/checkout@v4
+
+      - name: Build static PID1 and true dynamic iOS ARM64 program
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p dist
+          SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
+          echo "SDK: $SDK"
+          xcrun clang -target arm64-apple-ios16.0 -x assembler-with-cpp -c tools/phase7a-init.S -o dist/phase7a-init.o
+          python3 tools/mkinit.py dist/phase7a-init.o dist/launchd
+          xcrun --sdk iphoneos clang -target arm64-apple-ios16.0 -isysroot "$SDK" \
+            -O2 -fno-stack-protector -Wl,-dead_strip \
+            tools/phase7a-dynamic.c -o dist/pixelios-dynamic
+          codesign --force --sign - dist/pixelios-dynamic
+          file dist/launchd dist/pixelios-dynamic
+          xcrun otool -l dist/pixelios-dynamic | grep -A4 -E 'LC_LOAD_DYLINKER|LC_LOAD_DYLIB|LC_CODE_SIGNATURE'
+
+      - name: Verify Mach-O load commands and identify dyld/library requirements
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import struct
+          from pathlib import Path
+
+          def commands(path):
+              b = Path(path).read_bytes()
+              header = struct.unpack_from("<8I", b, 0)
+              assert header[0] == 0xfeedfacf
+              assert header[1] == 0x0100000c
+              assert header[3] == 2
+              off = 32
+              result = []
+              for _ in range(header[4]):
+                  cmd, size = struct.unpack_from("<II", b, off)
+                  assert 8 <= size and off + size <= len(b)
+                  result.append((cmd, b[off:off+size]))
+                  off += size
+              assert off == 32 + header[5]
+              return b, result
+
+          static, cmds = commands("dist/launchd")
+          assert any(cmd == 0x5 for cmd, _ in cmds)
+          assert any(cmd == 0x1d for cmd, _ in cmds)
+          assert not any(cmd == 0xe for cmd, _ in cmds)
+          assert b'/bin/pixelios-dynamic' in static
+          assert b'P7A MULTIPROCESS EXEC PASS' in static
+          assert b'P7A EXECVE FAILED' in static
+
+          obj = Path("dist/phase7a-init.o").read_bytes()
+          obj_off = 32
+          ncmds = struct.unpack_from("<I", obj, 16)[0]
+          for _ in range(ncmds):
+              cmd, size = struct.unpack_from("<II", obj, obj_off)
+              if cmd == 0x19:
+                  nsects = struct.unpack_from("<I", obj, obj_off+64)[0]
+                  for i in range(nsects):
+                      section = obj_off+72+80*i
+                      nreloc = struct.unpack_from("<I", obj, section+60)[0]
+                      assert nreloc == 0
+              obj_off += size
+
+          dynamic, cmdlist = commands("dist/pixelios-dynamic")
+          assert any(cmd == 0xe for cmd, _ in cmdlist), 'missing LC_LOAD_DYLINKER'
+          assert any(cmd in (0xc, 0x18, 0x1f, 0x80000018) for cmd, _ in cmdlist), 'missing dynamic library'
+          assert any(cmd == 0x1d for cmd, _ in cmdlist), 'missing code signature'
+          assert not any(cmd == 0x5 for cmd, _ in cmdlist), 'child must be normal dynamic binary'
+
+          deps = []
+          for cmd, data in cmdlist:
+              if cmd == 0xe or cmd in (0xc, 0x18, 0x1f, 0x80000018):
+                  offset = struct.unpack_from("<I", data, 8)[0]
+                  assert 8 <= offset < len(data)
+                  deps.append({"kind": "dyld" if cmd == 0xe else "dylib", "path": data[offset:].split(b'\0')[0].decode()})
+          assert any(x["kind"] == "dyld" and x["path"] == "/usr/lib/dyld" for x in deps)
+          assert any(x["kind"] == "dylib" and "libSystem" in x["path"] for x in deps)
+
+          for marker in (b'/dev/console', b'P7A DYNAMIC MACH-O STARTED THROUGH DYLD',
+                         b'P7A DYNAMIC LIBSYSTEM PASS; EXIT=42'):
+              assert marker in dynamic, marker
+
+          manifest = {
+              "type": "phase7a-dynamic-ios-arm64-macho-probe",
+              "hardware_tested": False,
+              "no_flash": True,
+              "init_sha256": hashlib.sha256(static).hexdigest(),
+              "dynamic_sha256": hashlib.sha256(dynamic).hexdigest(),
+              "dynamic_dependencies": deps,
+              "notes": "Requires matching real iOS dyld and libSystem/shared cache, not present in GitHub Actions artifacts. Do not boot until validated.",
+          }
+          Path("dist/phase7a-dependencies.json").write_text(json.dumps(manifest, indent=2) + "\n")
+          print("PASS: static PID1 launcher and independent normal iOS arm64 executable")
+          print("PASS: LC_LOAD_DYLINKER, libSystem dependency and ad hoc code signature")
+          print("DEPENDENCIES:", deps)
+          print("STATIC SHA256:", manifest["init_sha256"])
+          print("DYNAMIC SHA256:", manifest["dynamic_sha256"])
+          print("NOT HARDWARE READY: real dyld and libSystem/shared cache required")
+          PY
+          python3 -m py_compile tools/phase7a-inventory.py
+          shasum -a 256 dist/launchd dist/pixelios-dynamic > dist/SHA256SUMS
+
+      - name: Upload Phase 7A binaries and dependency manifest (no boot image)
+        uses: actions/upload-artifact@v4
+        with:
+          name: pixelios-phase7a-dyld-probe
+          path: |
+            dist/launchd
+            dist/phase7a-init.o
+            dist/pixelios-dynamic
+            dist/SHA256SUMS
+            dist/phase7a-dependencies.json
+          if-no-files-found: error
