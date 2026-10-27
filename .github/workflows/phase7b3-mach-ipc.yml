@@ -120,6 +120,29 @@ jobs:
           assert "fastboot boot" not in src and "fastboot flash" not in src
           print("PASS: Mach IPC test stage syntax, SHA provenance, single child replacement, separate COW root")
           PY
+          bash -n tools/phase7b3-mach-ipc-rxfix-stage.sh
+          python3 - <<'PY'
+          from pathlib import Path
+          src=Path("tools/phase7b3-mach-ipc-rxfix-stage.sh").read_text()
+          at=src.index("python3 - \"$SOURCE\" \"$WORK\" \"$DEST\"")
+          start=src.index("<<'PY'\n",at)+len("<<'PY'\n")
+          end=src.index("\nPY\n",start)
+          compile(src[start:end],"phase7b3-mach-receive-stage-python","exec")
+          for needle in (
+              "RUN=40494142051",
+              "CI_COMMIT=bfc75e85ef4014db4184f48b5df07dcfef3f22b6",
+              "CHILD_SHA=9afe7ba90fb779015f1979417650bf92b466098c0bc415969d8503ede6a992a1",
+              "PREVIOUS_CHILD_SHA=843e34fb3c9a5dd5c3b1022ddc6e283d2e65feca4166b0deadb66948a35417e7",
+              "PixelIOS-Phase7B3-MachIPC-RXFix-Root",
+              "cp --reflink=always --sparse=auto",
+              "sudo cmp \"$SOURCE/dist/launchd\" \"$MNT/sbin/launchd\"",
+              "sudo cmp \"$WORK/dist/launchd\" \"$MNT/sbin/launchd\"",
+              "bash \"$DEST/pixelios-phase7b3-machipc-rxfix-raven-safe-boot.sh\" audit",
+          ):
+              assert needle in src,needle
+          assert "fastboot flash" not in src and "fastboot boot" not in src
+          print("PASS: RX-size fix stage syntax, embedded Python, COW-only and pinned signed artifact")
+          PY
           shasum -a 256 dist/pixelios-dynamic > dist/SHA256SUMS
 
       - name: Upload Mach IPC dynamic child only
