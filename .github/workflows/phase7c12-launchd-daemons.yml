@@ -69,8 +69,8 @@ jobs:
           print("PASS: real launchd + minimal essential daemons, no fake launchd/XPC")
           resume=Path("tools/phase7c12-resume-staged-root.sh").read_text()
           for required in (
-              'sudo chown "$(id -u):$(id -g)" "$WORK/dist/launchd"',
-              'chmod u+r "$WORK/dist/launchd"',
+              'sudo chown "$(id -u):$(id -g)" "$WORK/dist/launchd" "$WORK/launchd-stage.json"',
+              'chmod u+r "$WORK/dist/launchd" "$WORK/launchd-stage.json"',
               'report.get("staging_verified") is True',
               'report.get("staged_job_count") == 4',
               'source_launchd_sha256',
@@ -92,6 +92,7 @@ jobs:
               en=resume.index(stop_token,st)
               compile(resume[st:en],start_token.strip(),"exec")
           assert 'sudo install -o "$(id -u)" -g "$(id -g)" -m 0755' in sh
+          assert 'sudo chown "$(id -u):$(id -g)" "$WORK/launchd-stage.json"' in sh
           print("PASS: root-owned launchd packaging fix and resumable failed staging")
           print("NOTE: Real launchd/daemons remain hardware-unverified")
           PY
