@@ -46,7 +46,7 @@ jobs:
               "mach_port_insert_right(", "MACH_MSG_TYPE_MAKE_SEND",
               "mach_msg(&tx.header", "MACH_SEND_MSG | MACH_SEND_TIMEOUT",
               "mach_msg(&rx.header", "MACH_RCV_MSG | MACH_RCV_TIMEOUT",
-              "mach_port_destroy(", "P7B3 MACH IPC PASS; EXIT=42",
+              "mach_port_destruct(", "P7B3 MACH IPC PASS; EXIT=42",
               "return 42;",
           ):
               assert s in src, s
