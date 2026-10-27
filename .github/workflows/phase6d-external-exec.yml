@@ -1,0 +1,130 @@
+name: PixelIOS Phase 6D - External Mach-O Fork Execve Wait4
+
+on:
+  push:
+    branches:
+      - phase6d-fork-execwait-ci
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout isolated Phase 6D branch
+        uses: actions/checkout@v4
+
+      - name: Build two independent signed static ARM64 Mach-O executables
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p dist
+          xcodebuild -version
+          xcrun clang -target arm64-apple-ios16.0 -x assembler-with-cpp -c tools/phase6d-init.S -o dist/phase6d-init.o
+          xcrun clang -target arm64-apple-ios16.0 -x assembler-with-cpp -c tools/phase6d-child.S -o dist/phase6d-child.o
+          python3 tools/mkinit.py dist/phase6d-init.o dist/launchd
+          python3 tools/mkinit.py dist/phase6d-child.o dist/pixelios-child
+          file dist/launchd dist/pixelios-child
+
+      - name: Audit both executables and process lifecycle test
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import hashlib
+          import struct
+          from pathlib import Path
+
+          def check_obj(path):
+              b = Path(path).read_bytes()
+              magic, cpu, subtype, typ, ncmds, sizeofcmds, flags, reserved = struct.unpack_from('<8I', b)
+              assert (magic, cpu, typ) == (0xfeedfacf, 0x0100000c, 1), path
+              assert 32 + sizeofcmds <= len(b)
+              off, text = 32, None
+              for _ in range(ncmds):
+                  cmd, sz = struct.unpack_from('<II', b, off)
+                  assert 8 <= sz and off + sz <= len(b)
+                  if cmd == 0x19:
+                      nsects, = struct.unpack_from('<I', b, off+64)
+                      for idx in range(nsects):
+                          sec = off+72+idx*80
+                          sect = b[sec:sec+16].split(b'\0')[0]
+                          seg = b[sec+16:sec+32].split(b'\0')[0]
+                          _, size, data_off, _, _, nreloc = struct.unpack_from('<QQIIII', b, sec+32)
+                          assert (sect, seg, nreloc) == (b'__text', b'__TEXT', 0), path
+                          assert data_off + size <= len(b)
+                          text = b[data_off:data_off+size]
+                  off += sz
+              assert text is not None and 0 < len(text) < 8192
+              return text
+
+          def check_exe(path, markers):
+              b = Path(path).read_bytes()
+              magic, cpu, subtype, typ, ncmds, sizeofcmds, flags, reserved = struct.unpack_from('<8I', b)
+              assert (magic, cpu, typ) == (0xfeedfacf, 0x0100000c, 2)
+              assert 32 + sizeofcmds <= 0x400
+              off, cmds = 32, []
+              for _ in range(ncmds):
+                  cmd, sz = struct.unpack_from('<II', b, off)
+                  assert 8 <= sz and off + sz <= len(b)
+                  cmds.append(cmd)
+                  off += sz
+              assert 0x5 in cmds and 0x1d in cmds
+              assert 0xe not in cmds and 0xc not in cmds
+              assert b'/dev/console' in b
+              for marker in markers:
+                  assert marker in b, (path, marker)
+              print('PASS:', path, 'ARM64 Mach-O, LC_UNIXTHREAD, LC_CODE_SIGNATURE, no dyld')
+              print('SHA256:', hashlib.sha256(b).hexdigest())
+
+          check_obj('dist/phase6d-init.o')
+          check_obj('dist/phase6d-child.o')
+          check_exe('dist/launchd', (
+              b'PIXELIOS PHASE 6D:', b'/bin/pixelios-child',
+              b'P6D FORK CHILD PID=', b'P6D EXEC+WAIT PASS CHILD #',
+              b'P6D MULTIPROCESS EXEC PASS', b'P6D WAIT4 TIMEOUT',
+              b'P6D FORK FAILED', b'P6D EXECVE FAILED',
+              b'P6D HEARTBEAT: PID 1 ALIVE',
+          ))
+          check_exe('dist/pixelios-child', (
+              b'P6D EXTERNAL MACH-O CHILD LOADED FROM HFS+',
+              b'P6D EXEC CHILD PID=', b'P6D EXEC CHILD PPID=',
+              b'P6D EXEC CHILD EXIT=42',
+          ))
+
+          init = Path('tools/phase6d-init.S').read_text()
+          child = Path('tools/phase6d-child.S').read_text()
+          for needle in (
+              '#define SYS_fork    2', '#define SYS_wait4   7',
+              '#define SYS_execve  59', '#define SYS_exit    1',
+              'mov x2, #WNOHANG', 'cmp x23, #30',
+              'cmp x25, #3', 'cmp w10, #42',
+              'b.cs exec_failed', 'b heartbeat',
+          ):
+              assert needle in init, needle
+          for needle in ('#define SYS_exit     1', '#define SYS_getppid 39',
+                         'cmp x20, #1', 'mov x0, #42'):
+              assert needle in child, needle
+
+          assert Path('dist/launchd').read_bytes() != Path('dist/pixelios-child').read_bytes()
+          print('PASS: distinct signed static init and standalone child')
+          print('PASS: two child execs, wait4 status 42, bounded timeout, PID1 heartbeat')
+          print('NOTE: actual fork/exec/wait behavior requires Raven hardware testing')
+          PY
+          shasum -a 256 dist/launchd dist/pixelios-child > dist/SHA256SUMS
+
+      - name: Upload both Mach-O binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: pixelios-phase6d-external-exec
+          path: |
+            dist/launchd
+            dist/pixelios-child
+            dist/phase6d-init.o
+            dist/phase6d-child.o
+            dist/SHA256SUMS
+          if-no-files-found: error
