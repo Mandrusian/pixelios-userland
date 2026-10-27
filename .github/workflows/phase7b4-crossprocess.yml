@@ -93,6 +93,28 @@ jobs:
               "phase":"7B.4","no_flash":True,"hardware_verified":False,
               "sha256":hashlib.sha256(b).hexdigest(),"dependencies":deps},indent=2)+"\n")
           PY
+          bash -n tools/phase7b4-crossprocess-stage.sh
+          python3 - <<'PY'
+          from pathlib import Path
+          src=Path("tools/phase7b4-crossprocess-stage.sh").read_text()
+          at=src.index("python3 - \"$SOURCE\" \"$WORK\" \"$DEST\"")
+          st=src.index("<<'PY'\n",at)+len("<<'PY'\n")
+          en=src.index("\nPY\n",st)
+          compile(src[st:en],"phase7b4-staging-embedded-python","exec")
+          for token in (
+              "SOURCE=\"$BASE/PixelIOS-Phase7B3-MachIPC-RXFix-Root\"",
+              "DEST=\"$BASE/PixelIOS-Phase7B4-CrossProcess-Root\"",
+              "RUN=40499221996",
+              "CHILD_SHA=eb8445306c2a5a4b0df87477009f6a799fa6f8fc59d186c120a118a9580f607b",
+              "cp --reflink=always --sparse=auto",
+              "sudo cmp \"$WORK/dist/launchd\" \"$MNT/sbin/launchd\"",
+              "sudo install -o 0 -g 0 -m 0755 \"$WORK/dist/pixelios-dynamic\"",
+              "bash \"$DEST/pixelios-phase7b4-crossprocess-raven-safe-boot.sh\" audit",
+          ):
+              assert token in src,token
+          assert "fastboot flash" not in src and "fastboot boot" not in src
+          print("PASS: Phase7B4 separate CoW staging, pinned artifact, no phone writes")
+          PY
           shasum -a 256 dist/pixelios-dynamic > dist/SHA256SUMS
       - uses: actions/upload-artifact@v4
         with:
