@@ -116,7 +116,7 @@ jobs:
           print("DYNAMIC SHA256:", manifest["dynamic_sha256"])
           print("NOT HARDWARE READY: real dyld and libSystem/shared cache required")
           PY
-          python3 -m py_compile tools/phase7a-inventory.py
+          python3 -m py_compile tools/phase7a-inventory.py tools/phase7a-dyld-readiness.py
           shasum -a 256 dist/launchd dist/pixelios-dynamic > dist/SHA256SUMS
 
       - name: Upload Phase 7A binaries and dependency manifest (no boot image)
