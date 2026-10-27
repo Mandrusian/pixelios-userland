@@ -64,8 +64,8 @@ sha256sum -c "$PREVIOUS/LAUNCHER_SHA256SUMS"
 
 echo
 echo '=== RECOVER ROOT-OWNED DIST COPY PERMISSIONS ONLY ==='
-sudo chown "$(id -u):$(id -g)" "$WORK/dist/launchd"
-chmod u+r "$WORK/dist/launchd"
+sudo chown "$(id -u):$(id -g)" "$WORK/dist/launchd" "$WORK/launchd-stage.json"
+chmod u+r "$WORK/dist/launchd" "$WORK/launchd-stage.json"
 
 python3 - "$WORK" "$FINAL" "$EXPECTED_APPLE_LAUNCHD_SHA" "$EXPECTED_CHILD_SHA" <<'PYVERIFY'
 import hashlib,json,pathlib,sys
