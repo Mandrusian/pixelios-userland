@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - phase7a-dyld-completion-ci
+      - phase7b-process-lifecycle-ci
   workflow_dispatch:
 
 permissions:
@@ -150,7 +151,8 @@ jobs:
           for needle in (
               "NEW_INIT_SHA=b151698297940a450dc02249d7457f0022efdf240c25ad166ffb49b606932c3e",
               "CI_RUN=40483367839",
-              "cp --reflink=always --sparse=always",
+              "cp --reflink=always --sparse=auto",
+              "cp --reflink=never --sparse=auto",
               "PixelIOS-Phase7A-PlatformSpawn-Root",
               "PixelIOS-Phase7A-Completion-Root",
               "bash \"$FINAL/pixelios-phase7a-completion-raven-safe-boot.sh\" audit",
