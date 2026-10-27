@@ -43,7 +43,7 @@ jobs:
               "dispatch_semaphore_create(", "dispatch_queue_create(",
               "dispatch_async_f(", "dispatch_semaphore_wait(",
               "8LL * NSEC_PER_SEC", "dispatch_semaphore_signal(",
-              "mach_vm_allocate(", "mach_vm_deallocate(",
+              "vm_allocate(", "vm_deallocate(",
               "mmap(", "munmap(", "P7B5 PTHREAD JOIN AND MUTEX PASS",
               "P7B5 DISPATCH ASYNC AND SEMAPHORE PASS",
               "P7B5 MACH VM WRITE READ AND DEALLOCATE PASS",
