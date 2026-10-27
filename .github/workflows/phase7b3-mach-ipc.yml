@@ -93,6 +93,27 @@ jobs:
                           "hardware_verified":False,"no_flash":True},indent=2)+"\n"
           )
           PY
+          bash -n tools/phase7b3-mach-ipc-stage.sh
+          python3 - <<'PY'
+          from pathlib import Path
+          src=Path("tools/phase7b3-mach-ipc-stage.sh").read_text()
+          start=src.index("python3 - \"$SOURCE\" \"$WORK\" \"$DEST\"")
+          begin=src.index("<<'PY'\n", start)+len("<<'PY'\n")
+          end=src.index("\nPY\n", begin)
+          compile(src[begin:end], "phase7b3-stage-embedded-python", "exec")
+          for label in (
+              "RUN=40492667611",
+              "CHILD_SHA=843e34fb3c9a5dd5c3b1022ddc6e283d2e65feca4166b0deadb66948a35417e7",
+              "cp --reflink=always --sparse=auto",
+              "sudo cmp \"$SOURCE/dist/launchd\" \"$MNT/sbin/launchd\"",
+              "sudo install -o 0 -g 0 -m 0755 \"$WORK/dist/pixelios-dynamic\"",
+              "sha256sum -c \"$SOURCE/ROOT_SHA256SUMS\"",
+              "bash \"$DEST/pixelios-phase7b3-machipc-raven-safe-boot.sh\" audit",
+          ):
+              assert label in src,label
+          assert "fastboot boot" not in src and "fastboot flash" not in src
+          print("PASS: Mach IPC test stage syntax, SHA provenance, single child replacement, separate COW root")
+          PY
           shasum -a 256 dist/pixelios-dynamic > dist/SHA256SUMS
 
       - name: Upload Mach IPC dynamic child only
