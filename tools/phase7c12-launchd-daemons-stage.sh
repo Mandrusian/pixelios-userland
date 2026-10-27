@@ -105,8 +105,20 @@ else
          --report "$WORK/launchd-stage.json"
     sudo test -s "$DST_MNT/sbin/launchd"
     sudo cmp "$PREVIOUS/dist/pixelios-dynamic" "$DST_MNT/bin/pixelios-dynamic"
-    sudo cp -- "$DST_MNT/sbin/launchd" "$WORK/dist/launchd"
+    sudo install -o "$(id -u)" -g "$(id -g)" -m 0755 \
+        "$DST_MNT/sbin/launchd" "$WORK/dist/launchd"
     cp -- "$PREVIOUS/dist/pixelios-dynamic" "$WORK/dist/pixelios-dynamic"
+    python3 - "$WORK/dist/launchd" "$WORK/launchd-stage.json" <<'PYVERIFY'
+import hashlib
+import json
+from pathlib import Path
+import sys
+binary = Path(sys.argv[1])
+report = json.loads(Path(sys.argv[2]).read_text())
+assert report.get("staging_verified"), "launchd staging report incomplete"
+assert hashlib.sha256(binary.read_bytes()).hexdigest() == report["source_launchd_sha256"], "launchd copy differs from Apple source"
+print("PASS: Privately staged launchd is readable, with identical bytes to genuine Apple source")
+PYVERIFY
 
     sudo umount "$DST_MNT"
     sudo umount "$SRC_MNT"
