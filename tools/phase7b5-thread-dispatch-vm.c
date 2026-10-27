@@ -1,6 +1,5 @@
 #include <dispatch/dispatch.h>
 #include <mach/mach.h>
-#include <mach/mach_vm.h>
 #include <mach/vm_map.h>
 #include <pthread.h>
 #include <stdint.h>
@@ -66,7 +65,7 @@ typedef struct {
     dispatch_semaphore_t semaphore;
 } dispatch_test;
 
-static void dispatch_main(void *arg) {
+static void run_dispatch_job(void *arg) {
     dispatch_test *test = (dispatch_test *)arg;
     test->result = P7B5_DISPATCH_VALUE;
     atomic_store_explicit(&test->finished, 1u, memory_order_release);
@@ -115,7 +114,7 @@ int main(void) {
     if (!queue) return FAIL(fd, "dispatch_queue_create", 0, 57);
     SAY(fd, "P7B5 DISPATCH QUEUE CREATED\n");
 
-    dispatch_async_f(queue, &dt, dispatch_main);
+    dispatch_async_f(queue, &dt, run_dispatch_job);
     long wait_error = dispatch_semaphore_wait(dt.semaphore,
             dispatch_time(DISPATCH_TIME_NOW, 8LL * NSEC_PER_SEC));
     if (wait_error != 0)
@@ -128,11 +127,11 @@ int main(void) {
     dispatch_release(dt.semaphore);
     SAY(fd, "P7B5 DISPATCH ASYNC AND SEMAPHORE PASS\n");
 
-    mach_vm_address_t addr = 0;
-    kern_return_t kr = mach_vm_allocate(mach_task_self(), &addr,
+    vm_address_t addr = 0;
+    kern_return_t kr = vm_allocate(mach_task_self(), &addr,
                                         P7B5_VM_BYTES, VM_FLAGS_ANYWHERE);
     if (kr != KERN_SUCCESS || addr == 0)
-        return FAIL(fd, "mach_vm_allocate", kr, 60);
+        return FAIL(fd, "vm_allocate", kr, 60);
     SAY(fd, "P7B5 MACH VM ALLOCATE PASS\n");
 
     volatile uint32_t *value = (volatile uint32_t *)(uintptr_t)addr;
@@ -141,9 +140,9 @@ int main(void) {
     if (value[0] != 0x7b05aabb || value[64] != 0x11223344)
         return FAIL(fd, "mach_vm_read_write_mismatch", 0, 61);
 
-    kr = mach_vm_deallocate(mach_task_self(), addr, P7B5_VM_BYTES);
+    kr = vm_deallocate(mach_task_self(), addr, P7B5_VM_BYTES);
     if (kr != KERN_SUCCESS)
-        return FAIL(fd, "mach_vm_deallocate", kr, 62);
+        return FAIL(fd, "vm_deallocate", kr, 62);
     SAY(fd, "P7B5 MACH VM WRITE READ AND DEALLOCATE PASS\n");
 
     void *mapping = mmap(NULL, P7B5_VM_BYTES,
