@@ -86,29 +86,86 @@ def expected_scripts():
         text6 = text6.replace(old, new6)
     if not SIXD.is_file() or SIXD.read_bytes() != text6.encode():
         fail("proven Phase 6D launcher cannot be reproduced from pinned Phase 6B source")
+    old_guard = '[[ "$(stat -c %s "$ROOT_IMAGE")" == 67108864 ]]'
+    new_guard = '[[ "$(stat -c %s "$ROOT_IMAGE")" == 4294967296 ]]'
+    if text7.count(old_guard) != 1 or text6.count(old_guard) != 1:
+        fail("expected exactly one historic 64 MiB size gate per launcher")
+    text7 = text7.replace(old_guard, new_guard)
+    if hashlib.sha256(text7.replace(new_guard, old_guard).encode()).hexdigest() != "02630d30efa18f6349547778cb04fb581a856c40e7a7e1f314a68d681e0fef03":
+        fail("Phase 7A size-only patch did not reproduce the reviewed original launcher")
     return text7.encode()
 
 
 def write_launcher(expected):
     pin = hashlib.sha256(expected).hexdigest()
-    if SAFE.exists() or SAFE.is_symlink():
-        if SAFE.is_symlink() or SAFE.read_bytes() != expected:
+    old_guard = b'[[ "$(stat -c %s "$ROOT_IMAGE")" == 67108864 ]]'
+    new_guard = b'[[ "$(stat -c %s "$ROOT_IMAGE")" == 4294967296 ]]'
+    if expected.count(new_guard) != 1 or expected.count(old_guard):
+        fail("generated Phase 7A launcher must require exactly 4 GiB")
+    previous = expected.replace(new_guard, old_guard)
+    old_pin = hashlib.sha256(previous).hexdigest()
+    if old_pin != "02630d30efa18f6349547778cb04fb581a856c40e7a7e1f314a68d681e0fef03":
+        fail("previous Phase 7A launcher doesn't match hardware-gate history")
+    if SAFE.is_symlink() or PIN.is_symlink():
+        fail("safe launcher or checksum pin may not be symlinked")
+
+    if SAFE.is_file() and SAFE.read_bytes() == previous:
+        if not PIN.is_file() or PIN.read_text().strip() != old_pin:
+            fail("older launcher exists but its signed checksum pin differs")
+        backup_script = STAGE / "pixelios-phase7a-raven-safe-boot.sh.before-4gib-fix"
+        backup_pin = STAGE / "PHASE7A-LAUNCHER-SHA256.before-4gib-fix"
+        if backup_script.exists() or backup_pin.exists() or backup_script.is_symlink() or backup_pin.is_symlink():
+            fail("historical backup already present; refusing overwrite")
+        fd = os.open(backup_script, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "wb") as out:
+            out.write(previous)
+        fd = os.open(backup_pin, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w") as out:
+            out.write(old_pin + "\n")
+        print("PASS: preserved exact original Phase7A launcher and pin")
+        temp_script = STAGE / "pixelios-phase7a-raven-safe-boot.sh.new-size-gate"
+        if temp_script.exists() or temp_script.is_symlink():
+            fail("size-gate staging file already exists")
+        fd = os.open(temp_script, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o700)
+        with os.fdopen(fd, "wb") as out:
+            out.write(expected)
+        os.chmod(temp_script, 0o700)
+        os.replace(temp_script, SAFE)
+        print("PASS: migrated Phase7A alone from 64 MiB to exact 4 GiB size guard")
+
+    elif SAFE.is_file():
+        if SAFE.read_bytes() != expected:
             fail("Phase 7A safe launcher exists with unexpected content")
+    elif SAFE.exists():
+        fail("Phase 7A launcher path exists but is not a regular file")
     else:
         fd = os.open(SAFE, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o700)
-        with os.fdopen(fd, "wb") as f:
-            f.write(expected)
+        with os.fdopen(fd, "wb") as out:
+            out.write(expected)
         os.chmod(SAFE, 0o700)
-    if PIN.exists() or PIN.is_symlink():
-        if PIN.is_symlink() or PIN.read_text().strip() != pin:
-            fail("Phase 7A launcher pin is different")
+
+    if PIN.is_file() and PIN.read_text().strip() == old_pin and SAFE.read_bytes() == expected:
+        # This covers both normal migration and an interrupted pin update.
+        pin_tmp = STAGE / "PHASE7A-LAUNCHER-SHA256.new-size-gate"
+        if pin_tmp.exists() or pin_tmp.is_symlink():
+            fail("checksum-pin staging file already exists")
+        fd = os.open(pin_tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w") as out:
+            out.write(pin + "\n")
+        os.replace(pin_tmp, PIN)
+    elif PIN.is_file():
+        if PIN.read_text().strip() != pin:
+            fail("Phase 7A launcher SHA256 pin differs from expected")
+    elif PIN.exists():
+        fail("Phase 7A launcher pin exists but is not a regular file")
     else:
         fd = os.open(PIN, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        with os.fdopen(fd, "w") as f:
-            f.write(pin + "\n")
+        with os.fdopen(fd, "w") as out:
+            out.write(pin + "\n")
+
     verify(SAFE, pin)
     run("bash", "-n", SAFE)
-    print("PASS: Phase 7A launcher is a minimal pinned adaptation of proven Phase 6D safe launcher")
+    print("PASS: Phase 7A exact 4 GiB guard; old 64 MiB safety guards remain unchanged")
 
 
 def inspect_readonly():
