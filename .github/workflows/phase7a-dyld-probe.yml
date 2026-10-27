@@ -117,6 +117,21 @@ jobs:
           print("NOT HARDWARE READY: real dyld and libSystem/shared cache required")
           PY
           python3 -m py_compile tools/phase7a-inventory.py tools/phase7a-dyld-readiness.py
+          bash -n tools/phase7a-stage-readonly-root.sh
+          python3 - <<'PY'
+          from pathlib import Path
+          text = Path('tools/phase7a-stage-readonly-root.sh').read_text()
+          marker = "sudo python3 - \"$SRC_MNT\" \"$DST_MNT\" \"$WORK/dist\" <<'PY'\n"
+          start = text.index(marker) + len(marker)
+          end = text.index('\nPY\n', start)
+          compile(text[start:end], 'phase7a-stage-heredoc', 'exec')
+          assert 'sudo losetup --read-only' in text
+          assert 'ro,nosuid,nodev,noexec' in text
+          assert '[[ ! -e "$FINAL" && ! -L "$FINAL" ]]' in text
+          assert 'os.link(target, dst_cryptex / source.name)' in text
+          assert 'fastboot boot' not in text and 'fastboot flash' not in text
+          print('PASS: Phase 7A shell syntax, embedded Python, safety preconditions')
+          PY
           shasum -a 256 dist/launchd dist/pixelios-dynamic > dist/SHA256SUMS
 
       - name: Upload Phase 7A binaries and dependency manifest (no boot image)
