@@ -1,0 +1,103 @@
+name: PixelIOS Phase 7B.5 - Pthread Dispatch Mach VM
+
+on:
+  push:
+    branches:
+      - phase7b5-pthread-dispatch-vm-ci
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - name: Checkout Phase7B5 source
+        uses: actions/checkout@v4
+      - name: Compile ad-hoc signed iOS arm64 userspace probe
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p dist
+          SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
+          xcrun --sdk iphoneos clang -target arm64-apple-ios16.0 -isysroot "$SDK" \
+            -std=gnu11 -O2 -fno-stack-protector -Wall -Wextra -Werror \
+            -Wl,-dead_strip tools/phase7b5-thread-dispatch-vm.c -o dist/pixelios-dynamic
+          codesign --force --sign - dist/pixelios-dynamic
+          file dist/pixelios-dynamic
+          xcrun otool -L dist/pixelios-dynamic
+      - name: Verify linked iOS Mach-O, bounded concurrency and VM lifecycle
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib,json,struct
+          src=Path("tools/phase7b5-thread-dispatch-vm.c").read_text()
+          for p in (
+              "pthread_mutex_init(", "pthread_create(", "pthread_join(",
+              "atomic_store_explicit(", "atomic_load_explicit(",
+              "i < 800", "usleep(10000)",
+              "dispatch_semaphore_create(", "dispatch_queue_create(",
+              "dispatch_async_f(", "dispatch_semaphore_wait(",
+              "8LL * NSEC_PER_SEC", "dispatch_semaphore_signal(",
+              "mach_vm_allocate(", "mach_vm_deallocate(",
+              "mmap(", "munmap(", "P7B5 PTHREAD JOIN AND MUTEX PASS",
+              "P7B5 DISPATCH ASYNC AND SEMAPHORE PASS",
+              "P7B5 MACH VM WRITE READ AND DEALLOCATE PASS",
+              "P7B5 MMAP AND MUNMAP PASS",
+              "P7B5 PTHREAD DISPATCH MACH VM PASS; EXIT=42",
+              "return 42;",
+          ):
+              assert p in src,p
+          b=Path("dist/pixelios-dynamic").read_bytes()
+          magic,cpu,_,kind,ncmds,sizeofcmds,_,_=struct.unpack_from("<8I",b)
+          assert (magic,cpu,kind)==(0xfeedfacf,0x0100000c,2)
+          off=32;cmds=[]
+          for _ in range(ncmds):
+              cmd,size=struct.unpack_from("<II",b,off)
+              assert 8<=size and off+size<=len(b)
+              cmds.append((cmd,b[off:off+size]))
+              off+=size
+          assert off==32+sizeofcmds
+          assert any(c==0xe for c,_ in cmds)
+          assert any(c==0x1d for c,_ in cmds)
+          assert not any(c==0x5 for c,_ in cmds)
+          deps=[]
+          for cmd,payload in cmds:
+              if cmd in (0xe,0xc,0x18,0x1f,0x80000018):
+                  loc=struct.unpack_from("<I",payload,8)[0]
+                  assert 8<=loc<len(payload)
+                  deps.append(payload[loc:].split(b"\x00")[0].decode())
+          assert "/usr/lib/dyld" in deps
+          assert any("libSystem" in d for d in deps)
+          for marker in (
+              b'P7B5 PTHREAD CREATE PASS',
+              b'P7B5 PTHREAD JOIN AND MUTEX PASS',
+              b'P7B5 DISPATCH ASYNC AND SEMAPHORE PASS',
+              b'P7B5 MACH VM ALLOCATE PASS',
+              b'P7B5 MACH VM WRITE READ AND DEALLOCATE PASS',
+              b'P7B5 MMAP AND MUNMAP PASS',
+              b'P7B5 PTHREAD DISPATCH MACH VM PASS; EXIT=42',
+          ):
+              assert marker in b,marker
+          Path("dist/manifest.json").write_text(json.dumps({
+              "phase":"7B.5","no_flash":True,"hardware_verified":False,
+              "sha256":hashlib.sha256(b).hexdigest(),"dependencies":deps},indent=2)+"\n")
+          print("PASS: signed dynamic iOS ARM64 Mach-O with Apple dyld and libSystem")
+          print("PASS: bounded pthread worker, GCD queue, semaphore and Mach VM probes")
+          print("CHILD SHA256:",hashlib.sha256(b).hexdigest())
+          print("DEPENDENCIES:",deps)
+          PY
+          shasum -a 256 dist/pixelios-dynamic > dist/SHA256SUMS
+      - name: Upload only dynamic iOS probe artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pixelios-phase7b5-thread-dispatch-vm-child
+          path: |
+            dist/pixelios-dynamic
+            dist/SHA256SUMS
+            dist/manifest.json
+          if-no-files-found: error
