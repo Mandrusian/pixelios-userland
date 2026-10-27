@@ -57,10 +57,22 @@ printf '%s  %s\n' "$NEW_INIT_SHA" "$WORK/ci/launchd" | sha256sum -c -
 file "$WORK/ci/launchd"
 
 echo
-echo "=== MAKE COPY-ON-WRITE SNAPSHOT WITHOUT DUPLICATING 2.6 GIB CACHE ==="
-if ! cp --reflink=always --sparse=always -- "$SOURCE_IMAGE" "$IMAGE"; then
-    echo 'STOP: Copy-on-write cloning unavailable; will not duplicate multi-GiB cache or overwrite successful Phase7A root.' >&2
-    exit 1
+echo "=== COPY-ON-WRITE SNAPSHOT; FALL BACK ONLY WITH VERIFIED DISK HEADROOM ==="
+FREE_KIB="$(df -Pk "$BASE" | awk 'NR==2 {print $4}')"
+[[ "$FREE_KIB" =~ ^[0-9]+$ ]] || { echo 'STOP: Cannot check destination disk space' >&2; exit 1; }
+if cp --reflink=always --sparse=auto -- "$SOURCE_IMAGE" "$IMAGE"; then
+    echo "PASS: Source HFS+ image cloned using copy-on-write"
+else
+    if [[ -f "$IMAGE" && ! -L "$IMAGE" ]]; then
+        rm -f -- "$IMAGE"
+    fi
+    (( FREE_KIB >= 5 * 1024 * 1024 )) || {
+        echo 'STOP: COW unsupported and <5 GiB free; refusing physical cache duplicate' >&2
+        exit 1
+    }
+    echo 'COW cloning unsupported. Free space permits a separate physical copy.'
+    cp --reflink=never --sparse=auto -- "$SOURCE_IMAGE" "$IMAGE"
+    echo "PASS: Separate filesystem copy created without overwriting the Phase7A root"
 fi
 OLD_ROOT_SHA="$(awk 'NR==1 {print $1}' "$SRC/ROOT_SHA256SUMS")"
 printf '%s  %s\n' "$OLD_ROOT_SHA" "$IMAGE" | sha256sum -c -
