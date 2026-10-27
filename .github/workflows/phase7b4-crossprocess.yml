@@ -1,0 +1,104 @@
+name: PixelIOS Phase 7B.4 - Cross-Process Mach IPC
+
+on:
+  push:
+    branches:
+      - phase7b4-cross-process-mach-ci
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build ad-hoc signed iOS arm64 cross-process test
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p dist
+          SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
+          xcrun --sdk iphoneos clang -target arm64-apple-ios16.0 -isysroot "$SDK" \
+            -O2 -fno-stack-protector -Wall -Wextra -Werror -Wl,-dead_strip \
+            tools/phase7b4-cross-process.c -o dist/pixelios-dynamic
+          codesign --force --sign - dist/pixelios-dynamic
+          xcrun otool -l dist/pixelios-dynamic | grep -A4 -E 'LC_LOAD_DYLINKER|LC_LOAD_DYLIB|LC_CODE_SIGNATURE'
+      - name: Verify real two-task Mach IPC test and Mach-O
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib,struct,json
+          source=Path("tools/phase7b4-cross-process.c").read_text()
+          expected=(
+              "posix_spawnattr_set_platform_np",
+              "posix_spawnattr_setspecialport_np",
+              "TASK_BOOTSTRAP_PORT",
+              "task_get_special_port(",
+              "mach_port_allocate(",
+              "mach_port_insert_right(",
+              "mach_msg(&msg.header, MACH_SEND_MSG | MACH_SEND_TIMEOUT",
+              "mach_msg(&incoming.packet.header, MACH_RCV_MSG | MACH_RCV_TIMEOUT",
+              "PIXELIOS_BUFFER_BYTES 256",
+              "incoming.packet.sender_pid != (uint32_t)pid",
+              "waitpid(pid, &status, WNOHANG)",
+              "WEXITSTATUS(status) != 42",
+              "P7B4 CROSS-PROCESS MACH IPC PASS; EXIT=42",
+              "return 42;",
+              "strcmp(argv[1], \"--worker\")",
+              "300000",
+          )
+          for s in expected:
+              assert s in source,s
+          assert "fastboot " not in source
+          b=Path("dist/pixelios-dynamic").read_bytes()
+          magic,cpu,subtype,kind,ncmds,sizeofcmds,flags,reserved=struct.unpack_from("<8I",b)
+          assert (magic,cpu,kind)==(0xfeedfacf,0x0100000c,2)
+          offset=32;cmds=[]
+          for _ in range(ncmds):
+              cmd,size=struct.unpack_from("<II",b,offset)
+              assert 8<=size and offset+size<=len(b)
+              cmds.append((cmd,b[offset:offset+size]))
+              offset+=size
+          assert offset==32+sizeofcmds
+          assert any(c==0xe for c,_ in cmds)
+          assert any(c==0x1d for c,_ in cmds)
+          assert not any(c==0x5 for c,_ in cmds)
+          deps=[]
+          for cmd,payload in cmds:
+              if cmd in (0xe,0xc,0x18,0x1f,0x80000018):
+                  nameoff=struct.unpack_from("<I",payload,8)[0]
+                  assert 8<=nameoff<len(payload)
+                  deps.append(payload[nameoff:].split(b"\0")[0].decode())
+          assert "/usr/lib/dyld" in deps
+          assert any("libSystem" in d for d in deps)
+          for bmark in (
+              b'P7B4 SERVER REGISTERED BOOTSTRAP PORT FOR SPAWN',
+              b'P7B4 SERVER SPAWNED WORKER PID=',
+              b'P7B4 WORKER INHERITED BOOTSTRAP SEND RIGHT',
+              b'P7B4 SERVER RECEIVED AND VERIFIED CROSS-TASK MACH MESSAGE',
+              b'P7B4 SERVER REAPED WORKER EXIT=42',
+              b'P7B4 CROSS-PROCESS MACH IPC PASS; EXIT=42',
+          ):
+              assert bmark in b,bmark
+          print("PASS: ad-hoc signed iOS Mach-O; real iOS dyld and libSystem required")
+          print("PASS: separate task via platform-aware posix_spawn, special-port right passed and validated")
+          print("PASS: bounded IPC timeout, exact cookie/pid/header, worker exit and port cleanup")
+          print("CHILD SHA256:",hashlib.sha256(b).hexdigest())
+          Path("dist/manifest.json").write_text(json.dumps({
+              "phase":"7B.4","no_flash":True,"hardware_verified":False,
+              "sha256":hashlib.sha256(b).hexdigest(),"dependencies":deps},indent=2)+"\n")
+          PY
+          shasum -a 256 dist/pixelios-dynamic > dist/SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pixelios-phase7b4-crossprocess-child
+          path: |
+            dist/pixelios-dynamic
+            dist/SHA256SUMS
+            dist/manifest.json
+          if-no-files-found: error
