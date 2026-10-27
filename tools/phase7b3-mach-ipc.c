@@ -65,7 +65,7 @@ int main(void) {
     kr = mach_port_insert_right(mach_task_self(), receive, receive, MACH_MSG_TYPE_MAKE_SEND);
     if (kr != KERN_SUCCESS) {
         int rc = PROBLEM(fd, "mach_port_insert_right", kr, 52);
-        (void)mach_port_destroy(mach_task_self(), receive);
+        (void)mach_port_destruct(mach_task_self(), receive, -1, 0);
         close(fd);
         return rc;
     }
@@ -83,7 +83,7 @@ int main(void) {
                   tx.header.msgh_size, 0, MACH_PORT_NULL, 5000, MACH_PORT_NULL);
     if (kr != KERN_SUCCESS) {
         int rc = PROBLEM(fd, "mach_msg_send", kr, 53);
-        (void)mach_port_destroy(mach_task_self(), receive);
+        (void)mach_port_destruct(mach_task_self(), receive, -1, 0);
         close(fd);
         return rc;
     }
@@ -95,7 +95,7 @@ int main(void) {
                   0, (mach_msg_size_t)sizeof(rx), receive, 5000, MACH_PORT_NULL);
     if (kr != KERN_SUCCESS) {
         int rc = PROBLEM(fd, "mach_msg_receive", kr, 54);
-        (void)mach_port_destroy(mach_task_self(), receive);
+        (void)mach_port_destruct(mach_task_self(), receive, -1, 0);
         close(fd);
         return rc;
     }
@@ -104,13 +104,13 @@ int main(void) {
         rx.value != PIXELIOS_MESSAGE_VALUE ||
         rx.header.msgh_local_port != receive) {
         SAY(fd, "P7B3 FAIL MACH PAYLOAD/HEADER MISMATCH\n");
-        (void)mach_port_destroy(mach_task_self(), receive);
+        (void)mach_port_destruct(mach_task_self(), receive, -1, 0);
         close(fd);
         return 55;
     }
     SAY(fd, "P7B3 MACH MSG RECEIVE+PAYLOAD PASS\n");
 
-    kr = mach_port_destroy(mach_task_self(), receive);
+    kr = mach_port_destruct(mach_task_self(), receive, -1, 0);
     if (kr != KERN_SUCCESS) {
         int rc = PROBLEM(fd, "mach_port_destroy", kr, 56);
         close(fd);
