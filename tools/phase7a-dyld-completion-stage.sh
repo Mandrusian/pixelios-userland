@@ -7,10 +7,10 @@ SRC="$BASE/PixelIOS-Phase7A-PlatformSpawn-Root"
 FINAL="$BASE/PixelIOS-Phase7A-Completion-Root"
 SOURCE_IMAGE="$SRC/usbroot-phase7a.hfs"
 PREVIOUS_INIT_SHA=7e432debbf7f9a107609c23a663f630a517b6bfb61292a6ab8ba485a11edefd1
-NEW_INIT_SHA=__INIT_HASH__
+NEW_INIT_SHA=b151698297940a450dc02249d7457f0022efdf240c25ad166ffb49b606932c3e
 DYNAMIC_SHA=a6df8fdabf445ec9825c6edef8c3444babf65ff647231e667f62c7544fdc0050
-CI_RUN=40482917591
-CI_COMMIT=a5abc819fa347f0abb0c85aa6ef200e48385615e
+CI_RUN=40483367839
+CI_COMMIT=6959964c2066a7331d851726fea002177cc6c4b9
 
 for cmd in gh sha256sum sudo losetup mount umount mountpoint findmnt fsck.hfsplus stat file python3 bash cp df awk grep git; do
     command -v "$cmd" >/dev/null || { printf 'STOP: Missing %s\n' "$cmd" >&2; exit 1; }
@@ -121,11 +121,6 @@ for old_part, new_part, count in replacements:
     if s.count(old_part) != count:
         raise SystemExit("STOP: unexpected launcher layout: " + old_part)
     s = s.replace(old_part, new_part)
-for forbidden in ("fastboot flash", "fastboot erase", "fastboot format"):
-    if forbidden in s:
-        # The historic audited launcher may mention these in its informational
-        # no-flash promise; no new executable fastboot commands are added.
-        pass
 target = stage / 'pixelios-phase7a-completion-raven-safe-boot.sh'
 fd = os.open(target, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o700)
 with os.fdopen(fd, 'w') as f:
