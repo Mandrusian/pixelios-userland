@@ -91,6 +91,30 @@ jobs:
           print("CHILD SHA256:",hashlib.sha256(b).hexdigest())
           print("DEPENDENCIES:",deps)
           PY
+          bash -n tools/phase7b5-runtime-stage.sh
+          python3 - <<'PY'
+          from pathlib import Path
+          script=Path("tools/phase7b5-runtime-stage.sh").read_text()
+          start=script.index("python3 - \"$SOURCE\" \"$WORK\" \"$DEST\"")
+          begin=script.index("<<'PY'\n",start)+len("<<'PY'\n")
+          end=script.index("\nPY\n",begin)
+          compile(script[begin:end],"phase7b5-stage-embedded-python","exec")
+          for marker in (
+              "SOURCE=\"$BASE/PixelIOS-Phase7B4-CrossProcess-Root\"",
+              "DEST=\"$BASE/PixelIOS-Phase7B5-Runtime-Root\"",
+              "RUN=40500831168",
+              "CI_COMMIT=c438547dc2b4b090ffeb711115a3c4e71cfcba96",
+              "CHILD_SHA=a042d495e8f4de2b6f56f522536c0a940814073cefe0e4a89cc79948f425ca21",
+              "PREVIOUS_CHILD_SHA=eb8445306c2a5a4b0df87477009f6a799fa6f8fc59d186c120a118a9580f607b",
+              "cp --reflink=always --sparse=auto",
+              "sudo cmp \"$SOURCE/dist/launchd\" \"$MNT/sbin/launchd\"",
+              "sudo install -o 0 -g 0 -m 0755 \"$WORK/dist/pixelios-dynamic\"",
+              "bash \"$DEST/pixelios-phase7b5-runtime-raven-safe-boot.sh\" audit",
+          ):
+              assert marker in script,marker
+          assert "fastboot flash" not in script and "fastboot boot" not in script
+          print("PASS: Phase7B5 root staging script syntax, pinning, no-flash and preserved Phase7B4")
+          PY
           shasum -a 256 dist/pixelios-dynamic > dist/SHA256SUMS
       - name: Upload only dynamic iOS probe artifact
         uses: actions/upload-artifact@v4
