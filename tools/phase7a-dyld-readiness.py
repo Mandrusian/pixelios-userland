@@ -134,7 +134,7 @@ def main():
 
     requirements = {
         "image_ios16": str(version.get("ProductVersion", "")).startswith("16."),
-        "dyld_exists_arm64": bool(dyld.get("arm64") and dyld.get("executable")),
+        "dyld_exists_arm64": bool(dyld.get("arm64") and dyld.get("filetype") == 7),
         "static_init_arm64": bool(init.get("arm64") and init.get("executable") and init.get("dyld") is None),
         "dynamic_child_arm64": bool(dynamic.get("arm64") and dynamic.get("executable") and dynamic.get("signature")),
         "dynamic_child_needs_dyld": dynamic.get("dyld") == "/usr/lib/dyld",
