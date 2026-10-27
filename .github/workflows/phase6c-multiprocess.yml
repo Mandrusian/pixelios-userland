@@ -1,0 +1,111 @@
+name: PixelIOS Phase 6C - Darwin Fork and Wait4
+
+on:
+  push:
+    branches:
+      - phase6c-multiprocess-ci
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - name: Checkout isolated Phase 6C branch
+        uses: actions/checkout@v4
+
+      - name: Assemble native Darwin multiprocess PID 1
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p dist
+          xcodebuild -version
+          xcrun clang -target arm64-apple-ios16.0 -x assembler-with-cpp -c tools/phase6c-init.S -o dist/phase6c-init.o
+          python3 tools/mkinit.py dist/phase6c-init.o dist/launchd
+          file dist/launchd
+
+      - name: Audit architecture, no relocations, syscall surface and fail-safe paths
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import hashlib
+          import struct
+          from pathlib import Path
+
+          obj = Path('dist/phase6c-init.o').read_bytes()
+          exe = Path('dist/launchd').read_bytes()
+          src = Path('tools/phase6c-init.S').read_text()
+          magic, cpu, _, kind, ncmds, _, _, _ = struct.unpack_from('<8I', obj)
+          assert (magic, cpu, kind) == (0xfeedfacf, 0x0100000c, 1)
+          off = 32
+          size_text = None
+          for _ in range(ncmds):
+              cmd, size = struct.unpack_from('<II', obj, off)
+              assert 8 <= size and off + size <= len(obj)
+              if cmd == 0x19:
+                  nsects, = struct.unpack_from('<I', obj, off + 64)
+                  for index in range(nsects):
+                      section = off + 72 + index*80
+                      name = obj[section:section+16].split(b'\0')[0]
+                      seg = obj[section+16:section+32].split(b'\0')[0]
+                      _, sec_size, sec_offset, _, _, reloc = struct.unpack_from('<QQIIII', obj, section+32)
+                      assert (seg, name) == (b'__TEXT', b'__text')
+                      assert reloc == 0
+                      size_text = sec_size
+                      assert sec_offset + sec_size <= len(obj)
+              off += size
+          assert size_text is not None
+          assert size_text < 8192
+
+          magic, cpu, _, kind, ncmds, _, _, _ = struct.unpack_from('<8I', exe)
+          assert (magic, cpu, kind) == (0xfeedfacf, 0x0100000c, 2)
+          off, cmds = 32, []
+          for _ in range(ncmds):
+              cmd, size = struct.unpack_from('<II', exe, off)
+              assert 8 <= size and off + size <= len(exe)
+              cmds.append(cmd)
+              off += size
+          assert 0x5 in cmds and 0x1d in cmds
+          assert 0xe not in cmds and 0xc not in cmds
+          assert b'/dev/console' in exe
+          for marker in (
+              b'PIXELIOS PHASE 6C: DARWIN FORK + WAIT4',
+              b'P6C PARENT PID=', b'P6C SPAWN CHILD #', b'P6C CHILD INDEX=',
+              b'P6C CHILD PID=', b'P6C CHILD PPID=',
+              b'P6C CHILD EXITING 42', b'P6C WAIT4 PASS CHILD #',
+              b'P6C REAPED CHILDREN=', b'P6C FORK FAILED',
+              b'P6C WAIT4 FAILED', b'P6C WAIT4 TIMEOUT',
+              b'P6C CHILD EXIT STATUS FAIL', b'P6C HEARTBEAT: PID 1 ALIVE',
+          ):
+              assert marker in exe, marker
+
+          for syscall in ('SYS_exit', 'SYS_fork', 'SYS_wait4', 'SYS_getpid', 'SYS_getppid', 'SYS_select'):
+              assert '#define ' + syscall in src
+              assert '#'+syscall in src
+          assert 'mov x2, #WNOHANG' in src
+          assert 'cmp x23, #20' in src
+          assert 'cmp w10, #42' in src
+          assert 'cmp x25, #3' in src
+          assert 'b heartbeat' in src
+
+          print('PASS: native Mach-O ARM64 static executable, signature, LC_UNIXTHREAD')
+          print('PASS: no relocations or dynamic linker, 16K-safe code')
+          print('PASS: two children, exit code 42, bounded wait4, PID1 heartbeat')
+          print('NOTE: fork/wait4 behavior still requires real Raven hardware validation')
+          print('SHA256:', hashlib.sha256(exe).hexdigest())
+          PY
+          shasum -a 256 dist/launchd > dist/SHA256SUMS
+
+      - name: Upload Phase 6C executable for separate read-only HFS+ root
+        uses: actions/upload-artifact@v4
+        with:
+          name: pixelios-phase6c-multiprocess-init
+          path: |
+            dist/launchd
+            dist/phase6c-init.o
+            dist/SHA256SUMS
+          if-no-files-found: error
