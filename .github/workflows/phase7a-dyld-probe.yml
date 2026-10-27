@@ -116,7 +116,7 @@ jobs:
           print("DYNAMIC SHA256:", manifest["dynamic_sha256"])
           print("NOT HARDWARE READY: real dyld and libSystem/shared cache required")
           PY
-          python3 -m py_compile tools/phase7a-inventory.py tools/phase7a-dyld-readiness.py
+          python3 -m py_compile tools/phase7a-inventory.py tools/phase7a-dyld-readiness.py tools/phase7a-raven-safe-gate.py
           bash -n tools/phase7a-stage-readonly-root.sh
           python3 - <<'PY'
           from pathlib import Path
