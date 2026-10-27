@@ -117,6 +117,26 @@ jobs:
           print('NOTE: dyld and platform-correct spawn still require Raven hardware validation')
           print('LAUNCHD SHA256:',hashlib.sha256(exe).hexdigest())
           PY
+          bash -n tools/phase7a-platform-spawn-stage.sh
+          python3 - <<'PY'
+          from pathlib import Path
+          src=Path("tools/phase7a-platform-spawn-stage.sh").read_text()
+          start=src.index("python3 - \"$REF6B\" \"$OLD/pixelios-phase7a-raven-safe-boot.sh\"")
+          line=src.index("<<'PY'\n",start)+len("<<'PY'\n")
+          end=src.index("\nPY\n",line)
+          compile(src[line:end],"phase7a-platformspawn-stage-embedded-python","exec")
+          for needle in (
+              "cp --reflink=auto --sparse=always",
+              "ROOT_OLD_SHA=d8b38ca2",
+              "INIT_NEW_SHA=7e432deb",
+              "PixelIOS-Phase7A-PlatformSpawn-Root",
+              "fsck.hfsplus -fn",
+              "bash \"$FINAL/pixelios-phase7a-platformspawn-raven-safe-boot.sh\" audit",
+          ):
+              assert needle in src,needle
+          assert "fastboot flash" not in src and "fastboot boot" not in src
+          print("PASS: Phase7A platform-spawn stage syntax, embedded Python and preserved baselines")
+          PY
           shasum -a 256 dist/launchd > dist/SHA256SUMS
 
       - name: Upload platform-correct static init
