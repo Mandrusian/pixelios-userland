@@ -44,13 +44,11 @@ jobs:
               "posix_spawnattr_set_platform_np(", "posix_spawnattr_setspecialport_np(",
               "mach_msg(&b->h, MACH_RCV_MSG | MACH_RCV_TIMEOUT",
               "mach_msg(h, MACH_SEND_MSG | MACH_SEND_TIMEOUT",
-              "incoming", "P7C_REGISTER", "P7C_LOOKUP", "P7C_LOOKUP_REPLY",
+              "registration", "lookup", "P7C_REGISTER", "P7C_LOOKUP", "P7C_LOOKUP_REPLY",
               "P7C_PING", "P7C_PONG", "P7C_TIMEOUT_MS 60000u",
-              "received", "waitpid(pid, &status, WNOHANG)",
+              "waitpid(pid, &status, WNOHANG)",
               "P7C0 SERVICE REGISTER LOOKUP PING PONG PASS; EXIT=42",
           ):
-              if needle=="received":
-                  continue
               assert needle in src,needle
           assert "fastboot flash" not in src
           b=Path("dist/pixelios-dynamic").read_bytes()
