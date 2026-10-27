@@ -1,0 +1,106 @@
+name: PixelIOS Phase 7B.3 - Mach IPC Dynamic Probe
+
+on:
+  push:
+    branches:
+      - phase7b3-mach-ipc-ci
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - name: Checkout isolated Mach IPC test branch
+        uses: actions/checkout@v4
+
+      - name: Build and sign iOS ARM64 Mach IPC probe
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p dist
+          SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
+          xcrun --sdk iphoneos clang -target arm64-apple-ios16.0 -isysroot "$SDK" \
+            -O2 -fno-stack-protector -Wall -Wextra -Werror \
+            -Wl,-dead_strip tools/phase7b3-mach-ipc.c -o dist/pixelios-dynamic
+          codesign --force --sign - dist/pixelios-dynamic
+          file dist/pixelios-dynamic
+          xcrun otool -l dist/pixelios-dynamic | grep -A4 -E 'LC_LOAD_DYLINKER|LC_LOAD_DYLIB|LC_CODE_SIGNATURE'
+
+      - name: Verify signed Mach-O, bounded Mach message test and safety
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import pathlib
+          import struct
+          import hashlib
+          import json
+
+          src = pathlib.Path("tools/phase7b3-mach-ipc.c").read_text()
+          for s in (
+              "mach_port_allocate(", "MACH_PORT_RIGHT_RECEIVE",
+              "mach_port_insert_right(", "MACH_MSG_TYPE_MAKE_SEND",
+              "mach_msg(&tx.header", "MACH_SEND_MSG | MACH_SEND_TIMEOUT",
+              "mach_msg(&rx.header", "MACH_RCV_MSG | MACH_RCV_TIMEOUT",
+              "mach_port_destroy(", "P7B3 MACH IPC PASS; EXIT=42",
+              "return 42;",
+          ):
+              assert s in src, s
+          assert "5000" in src and "mach_task_self()" in src
+          assert "PIXELIOS_MESSAGE_VALUE" in src
+
+          p = pathlib.Path("dist/pixelios-dynamic")
+          b = p.read_bytes()
+          magic, cpu, _, kind, ncmds, size, _, _ = struct.unpack_from("<8I", b)
+          assert (magic,cpu,kind)==(0xfeedfacf,0x0100000c,2)
+          off=32
+          cmds=[]
+          for _ in range(ncmds):
+              cmd,cmdsize = struct.unpack_from("<II",b,off)
+              assert cmdsize >= 8 and off+cmdsize <= len(b)
+              cmds.append((cmd,b[off:off+cmdsize]))
+              off += cmdsize
+          assert off == 32+size
+          assert any(c==0xe for c,_ in cmds)
+          assert any(c in (0xc,0x18,0x1f,0x80000018) for c,_ in cmds)
+          assert any(c==0x1d for c,_ in cmds)
+          assert not any(c==0x5 for c,_ in cmds)
+          for v in (b'P7B3 MACH IPC START THROUGH DYLD',b'P7B3 MACH MSG SEND PASS',
+                    b'P7B3 MACH MSG RECEIVE+PAYLOAD PASS',b'P7B3 MACH PORT CLEANUP PASS',
+                    b'P7B3 MACH IPC PASS; EXIT=42'):
+              assert v in b, v
+
+          deps = []
+          for cmd,payload in cmds:
+              if cmd == 0xe or cmd in (0xc,0x18,0x1f,0x80000018):
+                  at=struct.unpack_from("<I",payload,8)[0]
+                  assert 8<=at<len(payload)
+                  deps.append(payload[at:].split(b"\0")[0].decode())
+          assert "/usr/lib/dyld" in deps
+          assert any("libSystem" in d for d in deps)
+
+          print("PASS: signed dynamically linked iOS ARM64 Mach-O")
+          print("PASS: bounded Mach send/receive and verified payload, destroyed port")
+          print("DEPENDENCIES:",deps)
+          print("DYNAMIC SHA256:",hashlib.sha256(b).hexdigest())
+          print("NOTE: Requires original iOS shared cache and Raven hardware verification")
+          pathlib.Path("dist/dependencies.json").write_text(
+              json.dumps({"phase":"7B.3","platform":"ios","dyld":deps,
+                          "hardware_verified":False,"no_flash":True},indent=2)+"\n"
+          )
+          PY
+          shasum -a 256 dist/pixelios-dynamic > dist/SHA256SUMS
+
+      - name: Upload Mach IPC dynamic child only
+        uses: actions/upload-artifact@v4
+        with:
+          name: pixelios-phase7b3-mach-ipc-child
+          path: |
+            dist/pixelios-dynamic
+            dist/SHA256SUMS
+            dist/dependencies.json
+          if-no-files-found: error
