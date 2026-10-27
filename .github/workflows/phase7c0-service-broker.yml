@@ -1,0 +1,105 @@
+name: PixelIOS Phase 7C.0 - Mach Bootstrap Service Broker
+
+on:
+  push:
+    branches:
+      - phase7c0-bootstrap-service-ci
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile and sign iOS Mach broker probe
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p dist
+          SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
+          xcrun --sdk iphoneos clang -target arm64-apple-ios16.0 -isysroot "$SDK" \
+            -std=gnu11 -O2 -fno-stack-protector -Wall -Wextra -Werror -Wl,-dead_strip \
+            tools/phase7c0-service-broker.c -o dist/pixelios-dynamic
+          codesign --force --sign - dist/pixelios-dynamic
+          file dist/pixelios-dynamic
+          xcrun otool -L dist/pixelios-dynamic
+      - name: Verify signed iOS broker, register/lookup/ping/pong and bounded waits
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib, struct, json
+          src=Path("tools/phase7c0-service-broker.c").read_text()
+          for needle in (
+              "MACH_MSGH_BITS_COMPLEX", "mach_msg_port_descriptor_t",
+              "MACH_MSG_PORT_DESCRIPTOR", "MACH_MSG_TYPE_COPY_SEND",
+              "MACH_MSG_TYPE_MOVE_SEND_ONCE", "MACH_MSG_TYPE_MAKE_SEND_ONCE",
+              "mach_port_allocate(", "mach_port_insert_right(",
+              "task_get_special_port(", "TASK_BOOTSTRAP_PORT",
+              "posix_spawnattr_set_platform_np(", "posix_spawnattr_setspecialport_np(",
+              "mach_msg(&b->h, MACH_RCV_MSG | MACH_RCV_TIMEOUT",
+              "mach_msg(h, MACH_SEND_MSG | MACH_SEND_TIMEOUT",
+              "incoming", "P7C_REGISTER", "P7C_LOOKUP", "P7C_LOOKUP_REPLY",
+              "P7C_PING", "P7C_PONG", "P7C_TIMEOUT_MS 60000u",
+              "received", "waitpid(pid, &status, WNOHANG)",
+              "P7C0 SERVICE REGISTER LOOKUP PING PONG PASS; EXIT=42",
+          ):
+              if needle=="received":
+                  continue
+              assert needle in src,needle
+          assert "fastboot flash" not in src
+          b=Path("dist/pixelios-dynamic").read_bytes()
+          magic,cpu,_,kind,ncmds,sizeofcmds,_,_=struct.unpack_from("<8I",b)
+          assert (magic,cpu,kind)==(0xfeedfacf,0x0100000c,2)
+          off=32;cmds=[]
+          for _ in range(ncmds):
+              command,size=struct.unpack_from("<II",b,off)
+              assert 8<=size and off+size<=len(b)
+              cmds.append((command,b[off:off+size]));off+=size
+          assert off==32+sizeofcmds
+          assert any(c==0xe for c,_ in cmds)
+          assert any(c==0x1d for c,_ in cmds)
+          assert not any(c==0x5 for c,_ in cmds)
+          deps=[]
+          for cmd,payload in cmds:
+              if cmd in (0xe,0xc,0x18,0x1f,0x80000018):
+                  p=struct.unpack_from("<I",payload,8)[0]
+                  assert 8<=p<len(payload)
+                  deps.append(payload[p:].split(b"\0")[0].decode())
+          assert "/usr/lib/dyld" in deps and any("libSystem" in d for d in deps)
+          for marker in (
+              b'P7C0 SERVICE REGISTERED PORT VIA MACH DESCRIPTOR',
+              b'P7C0 BROKER REGISTERED SERVICE PORT NAME',
+              b'P7C0 CLIENT LOOKUP RECEIVED REGISTERED SEND RIGHT',
+              b'P7C0 SERVICE RECEIVED PING AND REPLIED PONG',
+              b'P7C0 CLIENT RECEIVED VALID SERVICE PONG',
+              b'P7C0 BROKER REAPED CLIENT EXIT=42',
+              b'P7C0 BROKER REAPED SERVICE EXIT=42',
+              b'P7C0 SERVICE REGISTER LOOKUP PING PONG PASS; EXIT=42',
+          ):
+              assert marker in b,marker
+          print("PASS: dynamically linked signed iOS Mach-O and Apple dyld")
+          print("PASS: service register/lookup via transferred Mach port descriptors and ping/pong")
+          print("PASS: two subprocesses; bounded receive, send and waitpid; no flash")
+          print("CHILD SHA256:",hashlib.sha256(b).hexdigest())
+          print("DEPENDENCIES:",deps)
+          Path("dist/manifest.json").write_text(json.dumps({
+              "phase":"7C.0","purpose":"custom Mach service broker (NOT Apple's launchd/XPC)",
+              "no_flash":True,"hardware_verified":False,
+              "sha256":hashlib.sha256(b).hexdigest(),"dependencies":deps
+          },indent=2)+"\n")
+          PY
+          shasum -a 256 dist/pixelios-dynamic > dist/SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pixelios-phase7c0-bootstrap-service-child
+          path: |
+            dist/pixelios-dynamic
+            dist/SHA256SUMS
+            dist/manifest.json
+          if-no-files-found: error
