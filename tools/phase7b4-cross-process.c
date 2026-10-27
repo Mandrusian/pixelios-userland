@@ -5,6 +5,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <sys/wait.h>
+#include <string.h>
 #include <unistd.h>
 
 extern int posix_spawnattr_set_platform_np(posix_spawnattr_t *attr,
@@ -186,12 +187,7 @@ int main(int argc, char **argv) {
     int fd = open("/dev/console", O_RDWR);
     if (fd < 0) return 90;
     int result;
-    if (argc == 2 && argv[1] &&
-        argv[1][0] == '-' && argv[1][1] == '-' &&
-        argv[1][2] == 'w' && argv[1][3] == 'o' &&
-        argv[1][4] == 'r' && argv[1][5] == 'k' &&
-        argv[1][6] == 'e' && argv[1][7] == 'r' &&
-        argv[1][8] == '\0') {
+    if (argc == 2 && argv[1] && strcmp(argv[1], "--worker") == 0) {
         result = worker(fd);
     } else {
         result = server(fd);
