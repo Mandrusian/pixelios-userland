@@ -156,7 +156,9 @@ print("New launcher SHA256:",hashlib.sha256(new.encode()).hexdigest())
 PY
 
 bash -n "$STAGE/pixelios-phase7a-platformspawn-raven-safe-boot.sh"
-sha256sum "$STAGE/pixelios-phase7a-platformspawn-raven-safe-boot.sh" \
+printf '%s  %s\n' \
+    "$(sha256sum "$STAGE/pixelios-phase7a-platformspawn-raven-safe-boot.sh" | awk '{print $1}')" \
+    "$FINAL/pixelios-phase7a-platformspawn-raven-safe-boot.sh" \
     > "$STAGE/LAUNCHER_SHA256SUMS"
 
 echo
