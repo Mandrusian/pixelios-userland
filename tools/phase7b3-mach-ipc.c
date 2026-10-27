@@ -11,6 +11,15 @@ typedef struct {
 
 #define PIXELIOS_MESSAGE_ID 0x7B030001
 #define PIXELIOS_MESSAGE_VALUE 0x5A17C032
+#define PIXELIOS_RCV_CAPACITY 256u
+
+typedef union {
+    pixelios_ipc_message message;
+    uint8_t storage[PIXELIOS_RCV_CAPACITY];
+} pixelios_receive_buffer;
+
+_Static_assert(PIXELIOS_RCV_CAPACITY >= sizeof(pixelios_ipc_message) + 128u,
+               "Mach receive buffer needs space for message and trailer");
 
 static void out(int fd, const char *s, size_t n) {
     while (n != 0) {
@@ -89,20 +98,20 @@ int main(void) {
     }
     SAY(fd, "P7B3 MACH MSG SEND PASS\n");
 
-    pixelios_ipc_message rx = {0};
-    rx.header.msgh_size = (mach_msg_size_t)sizeof(rx);
-    kr = mach_msg(&rx.header, MACH_RCV_MSG | MACH_RCV_TIMEOUT,
-                  0, (mach_msg_size_t)sizeof(rx), receive, 5000, MACH_PORT_NULL);
+    pixelios_receive_buffer rx = {0};
+    SAY(fd, "P7B3 MACH RECEIVE TRAILER-SAFE BUFFER=256\n");
+    kr = mach_msg(&rx.message.header, MACH_RCV_MSG | MACH_RCV_TIMEOUT,
+                  0, (mach_msg_size_t)sizeof(rx.storage), receive, 5000, MACH_PORT_NULL);
     if (kr != KERN_SUCCESS) {
         int rc = PROBLEM(fd, "mach_msg_receive", kr, 54);
         (void)mach_port_destruct(mach_task_self(), receive, -1, 0);
         close(fd);
         return rc;
     }
-    if (rx.header.msgh_id != PIXELIOS_MESSAGE_ID ||
-        rx.header.msgh_size != sizeof(rx) ||
-        rx.value != PIXELIOS_MESSAGE_VALUE ||
-        rx.header.msgh_local_port != receive) {
+    if (rx.message.header.msgh_id != PIXELIOS_MESSAGE_ID ||
+        rx.message.header.msgh_size != sizeof(pixelios_ipc_message) ||
+        rx.message.value != PIXELIOS_MESSAGE_VALUE ||
+        rx.message.header.msgh_local_port != receive) {
         SAY(fd, "P7B3 FAIL MACH PAYLOAD/HEADER MISMATCH\n");
         (void)mach_port_destruct(mach_task_self(), receive, -1, 0);
         close(fd);
