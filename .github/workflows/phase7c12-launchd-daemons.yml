@@ -81,7 +81,8 @@ jobs:
           ):
               assert required in resume,required
           assert "cp --reflink" not in resume
-          assert not any(x in resume for x in ("fastboot flash","fastboot erase","fastboot boot"))
+          assert not any(x in resume for x in ("fastboot flash","fastboot erase"))
+          assert not any(line.lstrip().startswith("fastboot ") for line in resume.splitlines())
           for start_token,stop_token in (
               ("<<'PYPATH'\n","\nPYPATH\n"),
               ("<<'PYVERIFY'\n","\nPYVERIFY\n"),
