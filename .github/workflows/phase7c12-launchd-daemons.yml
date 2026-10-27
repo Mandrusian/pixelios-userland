@@ -20,6 +20,7 @@ jobs:
         run: |
           set -Eeuo pipefail
           bash -n tools/phase7c12-launchd-daemons-stage.sh
+          bash -n tools/phase7c12-resume-staged-root.sh
           python3 -m py_compile tools/phase7c12-launchd-inventory.py tools/test_phase7c12_launchd.py
           python3 tools/test_phase7c12_launchd.py
       - name: Audit no-flash safety and combined phase deployment
@@ -66,5 +67,30 @@ jobs:
           print("PASS: Phase7C.1 + 7C.2 merged into one isolated staging and hardware test")
           print("PASS: source iOS root is read-only; no internal UFS writes or fastboot flash")
           print("PASS: real launchd + minimal essential daemons, no fake launchd/XPC")
+          resume=Path("tools/phase7c12-resume-staged-root.sh").read_text()
+          for required in (
+              'sudo chown "$(id -u):$(id -g)" "$WORK/dist/launchd"',
+              'chmod u+r "$WORK/dist/launchd"',
+              'report.get("staging_verified") is True',
+              'report.get("staged_job_count") == 4',
+              'source_launchd_sha256',
+              'fsck.hfsplus -fn "$IMAGE"',
+              'sha256sum -c "$PREVIOUS/ROOT_SHA256SUMS"',
+              'mv -T -- "$WORK" "$FINAL"',
+              'bash "$FINAL/pixelios-phase7c12-reallaunchd-raven-safe-boot.sh" audit',
+          ):
+              assert required in resume,required
+          assert "cp --reflink" not in resume
+          assert not any(x in resume for x in ("fastboot flash","fastboot erase","fastboot boot"))
+          for start_token,stop_token in (
+              ("<<'PYPATH'\n","\nPYPATH\n"),
+              ("<<'PYVERIFY'\n","\nPYVERIFY\n"),
+              ("<<'PYLAUNCH'\n","\nPYLAUNCH\n"),
+          ):
+              st=resume.index(start_token)+len(start_token)
+              en=resume.index(stop_token,st)
+              compile(resume[st:en],start_token.strip(),"exec")
+          assert 'sudo install -o "$(id -u)" -g "$(id -g)" -m 0755' in sh
+          print("PASS: root-owned launchd packaging fix and resumable failed staging")
           print("NOTE: Real launchd/daemons remain hardware-unverified")
           PY
