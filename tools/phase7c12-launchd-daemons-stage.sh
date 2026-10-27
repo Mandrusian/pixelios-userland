@@ -73,6 +73,8 @@ findmnt -rn -M "$SRC_MNT" -o OPTIONS | tr ',' '\n' | grep -qx ro
 echo
 echo '=== REAL LAUNCHD + ESSENTIAL DAEMON INVENTORY ==='
 sudo python3 "$AUDITOR" --source "$SRC_MNT" --report "$WORK/launchd-audit.json"
+sudo chown "$(id -u):$(id -g)" "$WORK/launchd-audit.json"
+chmod u+r "$WORK/launchd-audit.json"
 
 if [[ "$MODE" == audit ]]; then
     sudo umount "$SRC_MNT"
@@ -103,6 +105,8 @@ else
     echo '=== STAGE REAL APPLE LAUNCHD AND ESSENTIAL DAEMONS TOGETHER ==='
     sudo python3 "$AUDITOR" --source "$SRC_MNT" --target "$DST_MNT" \
          --report "$WORK/launchd-stage.json"
+    sudo chown "$(id -u):$(id -g)" "$WORK/launchd-stage.json"
+    chmod u+r "$WORK/launchd-stage.json"
     sudo test -s "$DST_MNT/sbin/launchd"
     sudo cmp "$PREVIOUS/dist/pixelios-dynamic" "$DST_MNT/bin/pixelios-dynamic"
     sudo install -o "$(id -u)" -g "$(id -g)" -m 0755 \
