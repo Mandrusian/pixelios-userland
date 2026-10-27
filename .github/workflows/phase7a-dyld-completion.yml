@@ -139,6 +139,27 @@ jobs:
           assert "fastboot flash" not in src and "fastboot boot" not in src
           print("PASS: Phase7A platform-spawn stage syntax, embedded Python and preserved baselines")
           PY
+          bash -n tools/phase7a-dyld-completion-stage.sh
+          python3 - <<'PY'
+          from pathlib import Path
+          src=Path("tools/phase7a-dyld-completion-stage.sh").read_text()
+          start=src.index("python3 - \"$SRC\" \"$WORK\" \"$FINAL\"")
+          begin=src.index("<<'PY'\n",start)+len("<<'PY'\n")
+          end=src.index("\nPY\n",begin)
+          compile(src[begin:end],"phase7a-completion-stage-python","exec")
+          for needle in (
+              "NEW_INIT_SHA=b151698297940a450dc02249d7457f0022efdf240c25ad166ffb49b606932c3e",
+              "CI_RUN=40483367839",
+              "cp --reflink=always --sparse=always",
+              "PixelIOS-Phase7A-PlatformSpawn-Root",
+              "PixelIOS-Phase7A-Completion-Root",
+              "bash \"$FINAL/pixelios-phase7a-completion-raven-safe-boot.sh\" audit",
+              "No boot or internal storage modification",
+          ):
+              assert needle in src,needle
+          assert "fastboot flash" not in src and "fastboot boot" not in src
+          print("PASS: dyld completion staging COW-only, pinned CI and Python syntax")
+          PY
           shasum -a 256 dist/launchd > dist/SHA256SUMS
 
       - name: Upload platform-correct static init
