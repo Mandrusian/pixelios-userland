@@ -32,7 +32,9 @@ _start:
     mov x16, #SYS_getpid
     svc #0x80
     b.cs exit_error
+    mov x20, x0
     SAY pid_prefix
+    mov x0, x20
     bl print_number
     SAY newline
 
