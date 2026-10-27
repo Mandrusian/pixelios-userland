@@ -1,0 +1,70 @@
+name: PixelIOS Phase 7C.1+7C.2 - Real Launchd and Daemons
+
+on:
+  push:
+    branches:
+      - phase7c12-real-launchd-daemons-ci
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate Python and Bash stage scripts
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          bash -n tools/phase7c12-launchd-daemons-stage.sh
+          python3 -m py_compile tools/phase7c12-launchd-inventory.py tools/test_phase7c12_launchd.py
+          python3 tools/test_phase7c12_launchd.py
+      - name: Audit no-flash safety and combined phase deployment
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          sh=Path("tools/phase7c12-launchd-daemons-stage.sh").read_text()
+          py=Path("tools/phase7c12-launchd-inventory.py").read_text()
+          for must in (
+              'MODE="${1:-audit}"',
+              'PIXELIOS_FULL_ROOT',
+              'SOURCE="$',
+              'PixelIOS-Phase7C0-ServiceBroker-Root',
+              'PixelIOS-Phase7C12-RealLaunchd-Daemons-Root',
+              'cp --reflink=always --sparse=auto',
+              'sudo losetup --read-only --find --show',
+              'findmnt -rn -M "$SRC_MNT" -o OPTIONS',
+              'sudo python3 "$AUDITOR" --source "$SRC_MNT" --target "$DST_MNT"',
+              'fsck.hfsplus -fn "$IMAGE"',
+              'sha256sum -c "$PREVIOUS/ROOT_SHA256SUMS"',
+              'bash "$FINAL/pixelios-phase7c12-reallaunchd-raven-safe-boot.sh" audit',
+          ):
+              assert must in sh,must
+          for must in (
+              'JOB_HINTS = ("notifyd", "logd", "configd", "securityd")',
+              'PLIST = "System/Library/xpc/launchd.plist"',
+              'INIT = "sbin/launchd"',
+              'MAX_BYTES = 350 * 1024 * 1024',
+              'RESERVE_BYTES = 128 * 1024 * 1024',
+              'os.replace(name, dst)',
+              'root_read_only_on_phone',
+              'original_launchd_job_count',
+              'selected',
+          ):
+              assert must in py,must
+          assert not any(token in sh for token in ('fastboot flash','fastboot erase','fastboot format'))
+          assert not any(token in py for token in ('fastboot flash','fastboot erase','fastboot format'))
+          start=sh.index('python3 - "$PREVIOUS" "$WORK" "$FINAL"')
+          begin=sh.index("<<'PY'\n",start)+len("<<'PY'\n")
+          end=sh.index("\nPY\n",begin)
+          compile(sh[begin:end],"phase7c12-safe-launcher-derivation","exec")
+          print("PASS: Phase7C.1 + 7C.2 merged into one isolated staging and hardware test")
+          print("PASS: source iOS root is read-only; no internal UFS writes or fastboot flash")
+          print("PASS: real launchd + minimal essential daemons, no fake launchd/XPC")
+          print("NOTE: Real launchd/daemons remain hardware-unverified")
+          PY
