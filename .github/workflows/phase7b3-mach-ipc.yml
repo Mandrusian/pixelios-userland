@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - phase7b3-mach-ipc-ci
+      - phase7b3-mach-ipc-buffer-fix-ci
   workflow_dispatch:
 
 permissions:
@@ -45,7 +46,12 @@ jobs:
               "mach_port_allocate(", "MACH_PORT_RIGHT_RECEIVE",
               "mach_port_insert_right(", "MACH_MSG_TYPE_MAKE_SEND",
               "mach_msg(&tx.header", "MACH_SEND_MSG | MACH_SEND_TIMEOUT",
-              "mach_msg(&rx.header", "MACH_RCV_MSG | MACH_RCV_TIMEOUT",
+              "mach_msg(&rx.message.header", "MACH_RCV_MSG | MACH_RCV_TIMEOUT",
+              "PIXELIOS_RCV_CAPACITY 256u",
+              "sizeof(rx.storage)",
+              "_Static_assert(PIXELIOS_RCV_CAPACITY >= sizeof(pixelios_ipc_message) + 128u",
+              "rx.message.header.msgh_size != sizeof(pixelios_ipc_message)",
+              "P7B3 MACH RECEIVE TRAILER-SAFE BUFFER=256",
               "mach_port_destruct(", "P7B3 MACH IPC PASS; EXIT=42",
               "return 42;",
           ):
@@ -84,7 +90,7 @@ jobs:
           assert any("libSystem" in d for d in deps)
 
           print("PASS: signed dynamically linked iOS ARM64 Mach-O")
-          print("PASS: bounded Mach send/receive and verified payload, destroyed port")
+          print("PASS: bounded Mach send/receive; trailer-safe 256-byte receive buffer, exact payload and cleanup")
           print("DEPENDENCIES:",deps)
           print("DYNAMIC SHA256:",hashlib.sha256(b).hexdigest())
           print("NOTE: Requires original iOS shared cache and Raven hardware verification")
