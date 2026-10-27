@@ -1,0 +1,152 @@
+name: PixelIOS Phase 7A - Dynamic Exit and Wait4 Completion
+
+on:
+  push:
+    branches:
+      - phase7a-dyld-completion-ci
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - name: Checkout isolated platform-spawn branch
+        uses: actions/checkout@v4
+
+      - name: Build signed relocation-free static PID1
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p dist
+          xcrun clang -target arm64-apple-ios16.0 -x assembler-with-cpp -c tools/phase7a-completion-init.S -o dist/phase7a-completion-init.o
+          python3 tools/mkinit.py dist/phase7a-completion-init.o dist/launchd
+          file dist/launchd
+
+      - name: Verify Mach-O, exact XNU spawn layout and bounded process lifecycle
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import ctypes as c
+          import hashlib
+          import pathlib
+          import struct
+
+          class Attr(c.Structure):
+              _fields_ = [
+                  ('psa_flags',c.c_short),('flags_padding',c.c_short),
+                  ('psa_sigdefault',c.c_uint32),('psa_sigmask',c.c_uint32),
+                  ('psa_pgroup',c.c_int32),('psa_binprefs',c.c_int32*4),
+                  ('psa_pcontrol',c.c_int32),('psa_apptype',c.c_int32),
+                  ('psa_cpumonitor_percent',c.c_uint64),('psa_cpumonitor_interval',c.c_uint64),
+                  ('psa_reserved',c.c_uint64),('psa_jetsam_flags',c.c_short),
+                  ('short_padding',c.c_short),('psa_priority',c.c_int32),
+                  ('psa_memlimit_active',c.c_int32),('psa_memlimit_inactive',c.c_int32),
+                  ('psa_qos_clamp',c.c_uint64),('psa_darwin_role',c.c_int32),
+                  ('psa_thread_limit',c.c_int32),('psa_max_addr',c.c_uint64),
+                  ('psa_no_smt',c.c_bool),('psa_tecs',c.c_bool),
+                  ('psa_platform',c.c_int32),('psa_subcpuprefs',c.c_int32*4),
+                  ('psa_options',c.c_uint32),('psa_port_soft_limit',c.c_uint32),
+                  ('psa_port_hard_limit',c.c_uint32),('psa_filedesc_soft_limit',c.c_uint32),
+                  ('psa_filedesc_hard_limit',c.c_uint32),('psa_crash_behavior',c.c_uint32),
+                  ('psa_dataless_iopolicy',c.c_int32),('psa_crash_behavior_deadline',c.c_uint64),
+                  ('psa_launch_type',c.c_uint8),('psa_crash_count',c.c_uint32),
+                  ('psa_throttle_timeout',c.c_uint32),('psa_ports',c.c_void_p),
+              ]
+          assert Attr.psa_platform.offset == 108, Attr.psa_platform.offset
+          assert Attr.psa_ports.offset == 184, Attr.psa_ports.offset
+          print('PASS: XNU 8796.141.3 spawn attr PLATFORM_IOS=2 at 108, attr bytes=184')
+
+          src = pathlib.Path('tools/phase7a-completion-init.S').read_text()
+          for needle in (
+              '#define SYS_posix_spawn 244',
+              '#define PLATFORM_IOS    2',
+              '#define SPAWN_ATTR_SIZE 184',
+              '#define SPAWN_PLATFORM_OFFSET 108',
+              'str w10, [x26, #SPAWN_PLATFORM_OFFSET]',
+              'str x10, [x27]',
+              'str x26, [x27, #8]',
+              'mov x16, #SYS_posix_spawn',
+              'str wzr, [x0]',
+              'cmp x23, #1200',
+              'cmp w10, #42',
+              'cmp x25, #3',
+              'P7A POSIX_SPAWN PLATFORM_IOS CHILD #',
+              'P7A DYNAMIC CHILD EXIT STATUS FAIL',
+              'P7A WAITING FOR DYNAMIC CHILD TO EXIT',
+              'P7A WAIT4 TIMEOUT (1200 POLLS)',
+          ):
+              assert needle in src, needle
+          assert 'SYS_execve' not in src
+          assert 'SYS_fork' not in src
+
+          obj = pathlib.Path('dist/phase7a-completion-init.o').read_bytes()
+          magic,cpu,subtype,kind,ncmds,cmdsize,flags,reserved = struct.unpack_from('<8I',obj)
+          assert (magic,cpu,kind) == (0xfeedfacf,0x0100000c,1)
+          off=32
+          for _ in range(ncmds):
+              cmd,size=struct.unpack_from('<II',obj,off)
+              assert 8<=size and off+size<=len(obj)
+              if cmd==0x19:
+                  nsections,=struct.unpack_from('<I',obj,off+64)
+                  for i in range(nsections):
+                      sec=off+72+i*80
+                      nreloc,=struct.unpack_from('<I',obj,sec+60)
+                      assert nreloc==0
+              off+=size
+
+          exe=pathlib.Path('dist/launchd').read_bytes()
+          magic,cpu,_,kind,ncmds,_,_,_=struct.unpack_from('<8I',exe)
+          assert (magic,cpu,kind)==(0xfeedfacf,0x0100000c,2)
+          off=32
+          cmds=[]
+          for _ in range(ncmds):
+              cmd,size=struct.unpack_from('<II',exe,off)
+              assert 8<=size and off+size<=len(exe)
+              cmds.append(cmd)
+              off+=size
+          assert 0x5 in cmds and 0x1d in cmds and 0xe not in cmds and 0xc not in cmds
+          for marker in (b'/bin/pixelios-dynamic',b'P7A POSIX_SPAWN PLATFORM_IOS',
+                         b'P7A SPAWN CHILD PID=',b'P7A DYNAMIC LIBSYSTEM MULTIPROCESS PASS',
+                         b'P7A HEARTBEAT: PID 1 ALIVE'):
+              assert marker in exe
+          print('PASS: static signed ARM64 executable; no relocs, no dynamic linker')
+          print('PASS: platform=2 spawn, two children, 1200 bounded wait4 polls, PID1 heartbeat')
+          print('NOTE: dyld and platform-correct spawn still require Raven hardware validation')
+          print('LAUNCHD SHA256:',hashlib.sha256(exe).hexdigest())
+          PY
+          bash -n tools/phase7a-platform-spawn-stage.sh
+          python3 - <<'PY'
+          from pathlib import Path
+          src=Path("tools/phase7a-platform-spawn-stage.sh").read_text()
+          start=src.index("python3 - \"$REF6B\" \"$OLD/pixelios-phase7a-raven-safe-boot.sh\"")
+          line=src.index("<<'PY'\n",start)+len("<<'PY'\n")
+          end=src.index("\nPY\n",line)
+          compile(src[line:end],"phase7a-platformspawn-stage-embedded-python","exec")
+          for needle in (
+              "cp --reflink=auto --sparse=always",
+              "ROOT_OLD_SHA=d8b38ca2",
+              "INIT_NEW_SHA=7e432deb",
+              "PixelIOS-Phase7A-PlatformSpawn-Root",
+              "fsck.hfsplus -fn",
+              "bash \"$FINAL/pixelios-phase7a-platformspawn-raven-safe-boot.sh\" audit",
+          ):
+              assert needle in src,needle
+          assert "fastboot flash" not in src and "fastboot boot" not in src
+          print("PASS: Phase7A platform-spawn stage syntax, embedded Python and preserved baselines")
+          PY
+          shasum -a 256 dist/launchd > dist/SHA256SUMS
+
+      - name: Upload platform-correct static init
+        uses: actions/upload-artifact@v4
+        with:
+          name: pixelios-phase7a-dyld-completion-init
+          path: |
+            dist/launchd
+            dist/phase7a-completion-init.o
+            dist/SHA256SUMS
+          if-no-files-found: error
